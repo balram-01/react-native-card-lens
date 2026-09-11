@@ -17,6 +17,40 @@ object CardLayoutParser {
     // ── Configurable Keyword Sets ────────────────────────────────────────────
 
     /**
+     * Common religious invocations, mottos and blessings (e.g. ॥ परमात्मा एक ॥, ॥ श्री गणेशाय नमः ॥)
+     * that should be excluded from company names, taglines, and person names.
+     */
+    val RELIGIOUS_INVOCATIONS: Set<String> = setOf(
+        "परमात्मा एक", "श्री गणेशाय नमः", "श्री गणेशाय नम", "श्री स्वामी समर्थ",
+        "जय माता दी", "ॐ", "ओम", "अल्लाह", "786", "सत्यमेव जयते",
+        "jai mata di", "om", "ganesh"
+    )
+
+    /**
+     * Statutory and commercial entity indicators (Devanagari & English).
+     * Cards containing these words receive substantial weight boosts for company name.
+     */
+    val COMPANY_INDICATORS: Set<String> = setOf(
+        // Devanagari
+        "प्रा. लि.", "प्रा.लि.", "लि.", "मार्केटींग", "मार्केटिंग", "सेल्स",
+        "एंटरप्रायझेस", "एंटरप्रायजेस", "ट्रेडर्स", "उद्योग", "कंपनी", "ग्रुप",
+        "इंजिनिअरिंग", "डेव्हलपर्स", "अॅन्ड", "अँड", "सर्व्हिसेस", "सर्व्हिस",
+        "हॉस्पिटल", "अकॅडमी", "इन्स्टिट्यूट", "फाउंडेशन",
+        // English
+        "PVT. LTD.", "PVT LTD", "LTD.", "LIMITED", "ENTERPRISES", "TRADERS",
+        "MARKETING", "SALES", "SERVICES", "AGENCY", "COMPANY", "CORP",
+        "GROUP", "ASSOCIATES", "INDUSTRIES", "DEVELOPERS"
+    )
+
+    /**
+     * Person name prefixes / salutations (English & Devanagari).
+     */
+    val NAME_SALUTATIONS: List<String> = listOf(
+        "Mr.", "Mr", "Mrs.", "Mrs", "Ms.", "Ms", "Dr.", "Dr", "Prof.", "Prof", "Shri", "Smt.", "Smt",
+        "श्री.", "श्री", "श्रीमती.", "श्रीमती", "सौ.", "सौ", "डॉ.", "डॉ", "प्रा."
+    )
+
+    /**
      * Role titles commonly found on business cards (English & Devanagari).
      * Configurable: callers can supply their own list or use defaults.
      */
@@ -43,11 +77,18 @@ object CardLayoutParser {
         "sector", "phase", "opposite", "opp", "near", "behind", "complex",
         "avenue", "park", "estate", "midc", "industrial area", "indl area",
         "marg", "gali", "rasta", "naka", "cross", "dist", "dist.", "state",
-        "flat", "shop", "office", "no.", "pincode", "pin",
-        // Devanagari
+        "flat", "shop", "office", "no.", "pincode", "pin", "res add", "office add", "add:", "address",
+        // Devanagari location, landmark and address prefixes
         "रोड", "नगर", "चौक", "रस्ता", "मार्ग", "गल्ली", "कॉलनी", "संकुल",
         "सोसायटी", "प्लॉट", "मजला", "जवळ", "समोर", "मागे", "इस्टेट", "दुकान",
-        "कार्यालय", "जि.", "पिन"
+        "कार्यालय", "जि.", "पिन", "पत्ता", "ऑफीस", "के पास", "के सामने", "के पीछे",
+        "मंदिर", "मंदीर", "न्यु", "न्यू", "नागपूर", "पुणे", "मुंबई", "नाशिक", "ठाणे", "औरंगाबाद"
+    )
+
+    // Slogan emotional keywords
+    private val SLOGAN_KEYWORDS = setOf(
+        "सोच", "जिंदगी", "विश्वास", "सेवा", "गुणवत्ता", "सत्य", "प्रगती", "ध्येय",
+        "quality", "trusted", "service", "innovate", "excellence", "growth", "best"
     )
 
     // ── Core Layout Parsing ──────────────────────────────────────────────────
@@ -69,7 +110,7 @@ object CardLayoutParser {
 
         val usedLineTexts = mutableSetOf<String>()
 
-        // 1. Guess Company Name (tallest non-contact text block)
+        // 1. Guess Company Name (tallest non-contact text block with company indicator boost)
         val (companyName, companyBlock) = guessCompanyName(blocks)
         companyBlock?.lines?.forEach { usedLineTexts.add(it.text.trim()) }
 
@@ -97,15 +138,45 @@ object CardLayoutParser {
 
     // ── Heuristic Functions ──────────────────────────────────────────────────
 
+    fun isReligiousInvocation(text: String): Boolean {
+        val clean = text.trim()
+        if ((clean.startsWith("॥") || clean.startsWith("||") || clean.startsWith("|")) &&
+            (clean.endsWith("॥") || clean.endsWith("||") || clean.endsWith("|"))) {
+            return true
+        }
+        val lower = clean.lowercase()
+        return RELIGIOUS_INVOCATIONS.any { inv ->
+            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(inv)}(?:$|[^\\p{L}\\p{N}])"
+            Regex(pattern).containsMatchIn(lower)
+        }
+    }
+
+    fun hasCompanyIndicator(text: String): Boolean {
+        val upper = text.uppercase()
+        return COMPANY_INDICATORS.any { kw ->
+            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
+            Regex(pattern).containsMatchIn(upper)
+        }
+    }
+
+    fun matchSalutation(text: String): String? {
+        val clean = text.trim()
+        return NAME_SALUTATIONS.firstOrNull { prefix ->
+            clean.startsWith(prefix, ignoreCase = true) &&
+            (clean.length == prefix.length || clean[prefix.length].isWhitespace() || clean[prefix.length] == '.')
+        }
+    }
+
     /**
      * Guess Company Name:
      * Evaluates blocks that do not contain phone, email, website, or GSTIN patterns.
-     * Picks the candidate block with the tallest line height (largest font header).
+     * Picks candidate with tallest line height and heavy boost for company indicator keywords.
      */
     fun guessCompanyName(blocks: List<RawBlock>): Pair<String?, RawBlock?> {
         val candidates = blocks.filter { block ->
             val text = block.text.trim()
             text.isNotBlank() &&
+            !isReligiousInvocation(text) &&
             FieldExtractor.extractPhoneNumbers(text).isEmpty() &&
             FieldExtractor.extractEmails(text).isEmpty() &&
             FieldExtractor.extractWebsites(text).isEmpty() &&
@@ -115,11 +186,11 @@ object CardLayoutParser {
 
         if (candidates.isEmpty()) return Pair(null, null)
 
-        // Find block with largest average line height (indicative of prominent header font)
         val bestBlock = candidates.maxByOrNull { block ->
             val lineCount = block.lines.size.coerceAtLeast(1)
             val avgLineHeight = block.boundingBox.height / lineCount
-            avgLineHeight
+            val indicatorBoost = if (hasCompanyIndicator(block.text)) 100 else 0
+            avgLineHeight + indicatorBoost
         }
 
         return Pair(bestBlock?.text?.trim(), bestBlock)
@@ -142,7 +213,26 @@ object CardLayoutParser {
             if (i in matchedIndices) continue
             val currentLine = lines[i]
             val currentText = currentLine.text.trim()
-            if (alreadyUsed.contains(currentText) || isContactInfo(currentText)) continue
+            if (alreadyUsed.contains(currentText) || isContactInfo(currentText) || isReligiousInvocation(currentText)) continue
+
+            // 0. Check if current line starts with a salutation (e.g. "Mr. Rajesh T. Bokade" or "श्री. राजेश बोकडे")
+            val salutation = matchSalutation(currentText)
+            if (salutation != null && isValidPersonName(currentText, alreadyUsed)) {
+                // Check if the next line is a role keyword
+                val nextIndex = i + 1
+                var matchedRole: String? = null
+                if (nextIndex < lines.size && nextIndex !in matchedIndices) {
+                    val nextText = lines[nextIndex].text.trim()
+                    val r = matchRole(nextText, roleKeywords)
+                    if (r != null) {
+                        matchedRole = nextText
+                        matchedIndices.add(nextIndex)
+                    }
+                }
+                persons.add(ContactPerson(name = currentText, role = matchedRole))
+                matchedIndices.add(i)
+                continue
+            }
 
             // 1. Check if current line contains an inline role (e.g. "Rajesh Sharma (Director)" or "Rajesh Sharma - CEO")
             val inlinePerson = extractInlinePerson(currentText, roleKeywords)
@@ -184,6 +274,14 @@ object CardLayoutParser {
         return persons
     }
 
+    private val EMBEDDED_PHONE_PREFIX_REGEX = Regex(
+        "(?i)[\\s,.-]+(?:m\\.?\\s*no|mob(?:ile)?|phone|tel|ph|cell|contact)[:\\s.-]*(?:\\([\\w\\s]+\\)[\\s.-]*)?\\d{6,}.*$"
+    )
+
+    fun cleanAddressLine(text: String): String {
+        return text.replace(EMBEDDED_PHONE_PREFIX_REGEX, "").trim().trimEnd(',', '-', '.')
+    }
+
     /**
      * Guess Address Lines:
      * Finds lines that contain configured location keywords, postal PIN codes,
@@ -198,9 +296,9 @@ object CardLayoutParser {
 
         for (line in lines) {
             val text = line.text.trim()
-            if (alreadyUsed.contains(text) || text.isBlank()) continue
+            if (alreadyUsed.contains(text) || text.isBlank() || isReligiousInvocation(text)) continue
 
-            // Skip lines that are purely phone, email, or website
+            // Skip lines that are purely email or website or GSTIN
             if (FieldExtractor.extractEmails(text).isNotEmpty() ||
                 FieldExtractor.extractWebsites(text).isNotEmpty() ||
                 FieldExtractor.extractGstin(text).isNotEmpty()) {
@@ -211,7 +309,8 @@ object CardLayoutParser {
             val hasPincode = FieldExtractor.extractPincodes(text).isNotEmpty()
 
             if (hasLocationKeyword || hasPincode) {
-                addressLines.add(text)
+                val cleaned = cleanAddressLine(text)
+                addressLines.add(if (cleaned.isNotBlank()) cleaned else text)
             }
         }
 
@@ -229,12 +328,13 @@ object CardLayoutParser {
         alreadyUsed: Set<String>
     ): String? {
         val companyBottom = companyBlock?.boundingBox?.bottom ?: 0
-        val addressTop = lines.filter { addressLines.contains(it.text.trim()) }
+        val addressTop = lines.filter { line -> addressLines.any { line.text.contains(it) } }
             .minOfOrNull { it.boundingBox.top } ?: Int.MAX_VALUE
 
         val candidates = lines.filter { line ->
             val text = line.text.trim()
             !alreadyUsed.contains(text) &&
+            !isReligiousInvocation(text) &&
             text.length in 5..80 &&
             !isNumeric(text) &&
             !isContactInfo(text) &&
@@ -242,7 +342,16 @@ object CardLayoutParser {
             line.boundingBox.bottom <= addressTop + 20
         }
 
-        return candidates.firstOrNull()?.text?.trim()
+        // Prioritize candidates with emotional / slogan words or ellipsis
+        val bestCandidate = candidates.maxByOrNull { line ->
+            var score = 0
+            val lower = line.text.lowercase()
+            if (line.text.contains("...") || line.text.contains("…") || line.text.endsWith(".")) score += 3
+            if (SLOGAN_KEYWORDS.any { lower.contains(it) }) score += 6
+            score
+        }
+
+        return bestCandidate?.text?.trim()
     }
 
     // ── Private Validation Helpers ───────────────────────────────────────────
@@ -284,6 +393,9 @@ object CardLayoutParser {
         if (text.isBlank() || alreadyUsed.contains(text)) return false
         if (text.length > 50) return false
         if (isContactInfo(text)) return false
+        if (hasCompanyIndicator(text)) return false
+        if (isReligiousInvocation(text)) return false
+        if (looksLikePureAddress(text)) return false
         // A person's name shouldn't have excessive numbers
         val digitCount = text.count { it.isDigit() }
         if (digitCount > 2) return false

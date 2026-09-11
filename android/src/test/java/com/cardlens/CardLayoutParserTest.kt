@@ -1,8 +1,6 @@
 package com.cardlens
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
+import org.junit.Assert.*
 import org.junit.Test
 
 class CardLayoutParserTest {
@@ -187,5 +185,65 @@ class CardLayoutParserTest {
         assertEquals(2, layout.addressLines.size)
         assertTrue(layout.addressLines[0].contains("Complex"))
         assertTrue(layout.addressLines[1].contains("Road"))
+    }
+
+    @Test
+    fun `parseLayout accurately extracts bilingual card with religious header, salutation and Devanagari suffixes`() {
+        val religiousBlock = RawBlock(
+            text = "॥ परमात्मा एक ॥",
+            boundingBox = BoundingBox(300, 10, 500, 35),
+            lines = listOf(RawLine("॥ परमात्मा एक ॥", BoundingBox(300, 10, 500, 35)))
+        )
+
+        val personBlock = RawBlock(
+            text = "Mr. Rajesh T. Bokade",
+            boundingBox = BoundingBox(20, 20, 250, 45),
+            lines = listOf(RawLine("Mr. Rajesh T. Bokade", BoundingBox(20, 20, 250, 45)))
+        )
+
+        val companyBlock = RawBlock(
+            text = "राजस मार्केटींग अॅन्ड सेल्स प्रा. लि.",
+            boundingBox = BoundingBox(40, 100, 750, 160),
+            lines = listOf(RawLine("राजस मार्केटींग अॅन्ड सेल्स प्रा. लि.", BoundingBox(40, 100, 750, 160)))
+        )
+
+        val taglineBlock = RawBlock(
+            text = "एक नई सोच जो आपकी जिंदगी बदल दे.....",
+            boundingBox = BoundingBox(100, 175, 700, 205),
+            lines = listOf(RawLine("एक नई सोच जो आपकी जिंदगी बदल दे.....", BoundingBox(100, 175, 700, 205)))
+        )
+
+        val addressBlock1 = RawBlock(
+            text = "ऑफीस पत्ता : ६६ न्यु डायमंड नगर, खरबी रोड, माता मंदीर के पास, नागपूर. M. No: ( Off ) 8888120511",
+            boundingBox = BoundingBox(20, 220, 780, 250),
+            lines = listOf(RawLine("ऑफीस पत्ता : ६६ न्यु डायमंड नगर, खरबी रोड, माता मंदीर के पास, नागपूर. M. No: ( Off ) 8888120511", BoundingBox(20, 220, 780, 250)))
+        )
+
+        val addressBlock2 = RawBlock(
+            text = "Res Add : 90, न्यु डायमंड नगर, खरबी रोड, नागपूर.",
+            boundingBox = BoundingBox(20, 260, 780, 290),
+            lines = listOf(RawLine("Res Add : 90, न्यु डायमंड नगर, खरबी रोड, नागपूर.", BoundingBox(20, 260, 780, 290)))
+        )
+
+        val blocks = listOf(religiousBlock, personBlock, companyBlock, taglineBlock, addressBlock1, addressBlock2)
+
+        val layout = CardLayoutParser.parseLayout(blocks)
+
+        // Company Name: Must be Rajas Marketing (NOT the religious header!)
+        assertEquals("राजस मार्केटींग अॅन्ड सेल्स प्रा. लि.", layout.companyName)
+
+        // Tagline: Must be the Hindi slogan
+        assertEquals("एक नई सोच जो आपकी जिंदगी बदल दे.....", layout.tagline)
+
+        // Person: Extracted via salutation prefix "Mr."
+        assertEquals(1, layout.contactPersons.size)
+        assertEquals("Mr. Rajesh T. Bokade", layout.contactPersons[0].name)
+
+        // Addresses: Both office and residential addresses extracted and cleaned of trailing phone
+        assertEquals(2, layout.addressLines.size)
+        assertTrue(layout.addressLines[0].contains("ऑफीस पत्ता"))
+        assertTrue(layout.addressLines[0].contains("नागपूर"))
+        assertFalse("Address line should have trailing phone stripped", layout.addressLines[0].contains("8888120511"))
+        assertTrue(layout.addressLines[1].contains("Res Add"))
     }
 }

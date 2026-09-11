@@ -205,4 +205,26 @@ class FieldExtractorTest {
         // Pincode (411014 found, and none from the phone numbers)
         assertEquals(listOf("411014"), result.pincodes)
     }
+
+    @Test
+    fun `extracts phones from bilingual card with Devanagari numerals and labels`() {
+        val text = """
+            Mr. Rajesh T. Bokade
+            M.: 9146496994
+            9373662998
+            ॥ परमात्मा एक ॥
+            राजस मार्केटींग अॅन्ड सेल्स प्रा. लि.
+            एक नई सोच जो आपकी जिंदगी बदल दे.....
+            ऑफीस पत्ता : ६६ न्यु डायमंड नगर, खरबी रोड, माता मंदीर के पास, नागपूर. M. No: ( Off ) 8888120511
+            Res Add : 90, न्यु डायमंड नगर, खरबी रोड, नागपूर.
+        """.trimIndent()
+
+        val fields = FieldExtractor.extractContactFields(text)
+
+        assertEquals(3, fields.phoneNumbers.size)
+        assertTrue(fields.phoneNumbers.contains("9146496994"))
+        assertTrue(fields.phoneNumbers.contains("9373662998"))
+        assertTrue(fields.phoneNumbers.contains("8888120511"))
+    }
 }
+

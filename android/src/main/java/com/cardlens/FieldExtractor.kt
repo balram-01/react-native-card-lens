@@ -106,6 +106,24 @@ object FieldExtractor {
     }
 
     /**
+     * Converts Devanagari numerals (०, १, २, ३, ४, ५, ६, ७, ८, ९ -> U+0966..U+096F)
+     * to standard ASCII digits (0..9).
+     */
+    fun normalizeDevanagariDigits(text: String): String {
+        val devZero = '\u0966'
+        val devNine = '\u096F'
+        return buildString(text.length) {
+            for (ch in text) {
+                if (ch in devZero..devNine) {
+                    append('0' + (ch - devZero))
+                } else {
+                    append(ch)
+                }
+            }
+        }
+    }
+
+    /**
      * Extract Indian mobile and landline numbers.
      * Supports formats:
      *  - +91 98765 43210
@@ -114,15 +132,17 @@ object FieldExtractor {
      *  - 9876543210
      *  - 98765 43210 / 91234 56789
      *  - Landlines: 020-25678901
+     *  - Numbers in Devanagari digits (९१४६४९६९९४ -> 9146496994)
      * Guarantees 6-digit pincodes are NOT extracted as phone numbers.
      */
     fun extractPhoneNumbers(text: String): List<String> {
         if (text.isBlank()) return emptyList()
 
+        val normalized = normalizeDevanagariDigits(text)
         val results = mutableListOf<String>()
 
         // 1. Check Indian mobile numbers
-        INDIAN_MOBILE_REGEX.findAll(text).forEach { match ->
+        INDIAN_MOBILE_REGEX.findAll(normalized).forEach { match ->
             val raw = match.value.trim()
             val digitsOnly = raw.filter { it.isDigit() }
             // An Indian phone number must have at least 10 digits
@@ -132,7 +152,7 @@ object FieldExtractor {
         }
 
         // 2. Check Indian landline numbers
-        INDIAN_LANDLINE_REGEX.findAll(text).forEach { match ->
+        INDIAN_LANDLINE_REGEX.findAll(normalized).forEach { match ->
             val raw = match.value.trim()
             val digitsOnly = raw.filter { it.isDigit() }
             if (digitsOnly.length in 8..12 && !results.any { it.contains(raw) }) {
@@ -155,11 +175,12 @@ object FieldExtractor {
     fun extractPincodes(text: String): List<String> {
         if (text.isBlank()) return emptyList()
 
-        val phoneNumbers = extractPhoneNumbers(text)
+        val normalized = normalizeDevanagariDigits(text)
+        val phoneNumbers = extractPhoneNumbers(normalized)
         val phoneDigits = phoneNumbers.map { it.filter { ch -> ch.isDigit() } }
-        val gstins = extractGstin(text)
+        val gstins = extractGstin(normalized)
 
-        val candidates = PINCODE_CANDIDATE_REGEX.findAll(text)
+        val candidates = PINCODE_CANDIDATE_REGEX.findAll(normalized)
             .map { it.value.trim() }
             .distinct()
             .toList()

@@ -78,6 +78,65 @@ export interface Spec extends TurboModule {
    * @returns         A map `{ type: 'card' | 'bill', data: BusinessCard | BillDocument }`.
    */
   scanDocument(imageUri: string): Promise<Object>;
+
+  /**
+   * Multi-page business card scanner (e.g. front & back).
+   * Aggregates contact details, QR code, and layout from all pages.
+   */
+  scanCardPages(imageUris: string[]): Promise<Object>;
+
+  /**
+   * Multi-page bill & invoice scanner.
+   * Aggregates continuous tabular line items across all pages.
+   */
+  scanBillPages(imageUris: string[]): Promise<Object>;
+
+  /**
+   * Multi-page universal auto-routing document scanner.
+   */
+  scanDocumentPages(imageUris: string[]): Promise<Object>;
+
+  /**
+   * Load an on-device model file (.task or .bin format) for the MediaPipe Thinking Module.
+   *
+   * @param modelPath Absolute file path on the device filesystem.
+   * @returns Promise<boolean> indicating whether the model loaded successfully.
+   */
+  loadThinkingModel(modelPath: string): Promise<boolean>;
+
+  /**
+   * Checks if the on-device Thinking Module is initialized and ready for inference.
+   */
+  isThinkingModelReady(): Promise<boolean>;
+
+  /**
+   * Refine and extract high-precision structured business card fields from raw text
+   * using the on-device Thinking Module (MediaPipe Tasks GenAI).
+   *
+   * @param rawText OCR text to extract structured card data from.
+   * @returns A BusinessCard map.
+   */
+  refineCardWithThinkingModule(rawText: string): Promise<Object>;
+
+  /**
+   * Unload the on-device Thinking Module model and free native memory.
+   */
+  unloadThinkingModel(): Promise<void>;
+
+  /**
+   * Downloads a MediaPipe model file (.task or .bin) to local internal storage.
+   * Emits live progress events via DeviceEventEmitter ('onThinkingModelDownloadProgress').
+   *
+   * @param url       Public HTTPS URL of the model file.
+   * @param fileName  Filename to store as in internal storage.
+   * @param authToken Optional Bearer token for HuggingFace gated model downloads.
+   * @returns         Absolute local file path on the device.
+   */
+  downloadThinkingModel(
+    url: string,
+    fileName: string,
+    authToken?: string
+  ): Promise<string>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('CardLens');

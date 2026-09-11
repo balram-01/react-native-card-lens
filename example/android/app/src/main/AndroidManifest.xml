@@ -11,6 +11,9 @@
       android:theme="@style/AppTheme"
       android:usesCleartextTraffic="${usesCleartextTraffic}"
       android:supportsRtl="true">
+      <meta-data
+        android:name="com.google.mlkit.vision.DEPENDENCIES"
+        android:value="ocr,ocr_devanagari,barcode" />
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"

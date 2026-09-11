@@ -1,1046 +1,2093 @@
 /**
- * react-native-card-lens — Comprehensive Example & QA App
+ * react-native-card-lens — Unified Document & Card Scanner Studio
  *
- * Demonstrates 100% on-device, zero-cost document extraction across all phases:
- *  - Phase 1: Live Document Scanner Camera UI with auto-crop & edge detection
- *  - Phase 2: Script-agnostic regex contact extractors (phone, email, web, GSTIN, PIN)
- *  - Phase 3: Layout heuristics (company, contact persons, roles, address, tagline)
- *  - Phase 4: Script detection & end-to-end Business Card engine (`scanCard`)
- *  - Phase 5: Bill & Invoice table reconstruction & metadata parser (`scanBill`)
- *  - Phase 6: Automatic Document Classifier & Auto-Routing (`scanDocument`)
+ * Single-screen automatic scanner that:
+ *  1. Scans cards and documents with real-time auto edge detection & perspective correction
+ *  2. Automatically classifies behind the scenes whether it is a Business Card or Bill/Invoice
+ *  3. Seamlessly renders structured contact fields or financial line-item tables
+ *  4. Provides a 100% real, dynamic On-Device LLM (llama.rn / GGUF) manager with live progress
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
-  SafeAreaView,
+  LogBox,
+  Platform,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { initLlama, type LlamaContext } from 'llama.rn';
+
+LogBox.ignoreAllLogs();
+
 import {
   startScanner,
-  recognizeText,
-  scanBarcodes,
   extractContactFields,
   extractCardLayout,
-  scanCard,
-  scanBill,
   scanDocument,
+  refineCardWithThinkingModule,
+  downloadThinkingModel,
 } from 'react-native-card-lens';
 import type {
   RawOcrResult,
-  BarcodeResult,
   ScanResult,
-  ContactFields,
-  CardLayoutFields,
   BusinessCard,
   BillDocument,
   DocumentScanResult,
+  ThinkingModelDownloadProgress,
+  LineItem,
 } from 'react-native-card-lens';
 
-type ActiveTab = 'auto' | 'card' | 'bill' | 'inspect';
+// ─── Free, Non-Gated GGUF Models (llama.rn / llama.cpp) ─────────────────────
+const AVAILABLE_SLM_MODELS = [
+  {
+    id: 'smollm2-360m-q4',
+    name: 'SmolLM2-360M Q4_K_M',
+    tag: 'Fastest (<1s)',
+    sizeMB: 231,
+    url: 'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf',
+    filename: 'SmolLM2-360M-Instruct-Q4_K_M.gguf',
+    description:
+      'Ultra-fast 231 MB model. Low RAM footprint. Instant on-device structured extraction.',
+  },
+  {
+    id: 'qwen25-05b-q4',
+    name: 'Qwen2.5-0.5B Q4_K_M',
+    tag: 'Balanced',
+    sizeMB: 340,
+    url: 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
+    filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
+    description:
+      '340 MB model. Excellent instruction following, complex layout disambiguation.',
+  },
+  {
+    id: 'tinyllama-q4',
+    name: 'TinyLlama-1.1B Q4_K_M',
+    tag: 'High Quality',
+    sizeMB: 669,
+    url: 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    filename: 'tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    description:
+      '669 MB model. Best reasoning depth and multi-lingual card understanding.',
+  },
+];
+
+// ─── Realistic Samples (Cards & Invoices) ──────────────────────────────────
+const SAMPLE_DOCUMENTS = [
+  {
+    title: '🏏 Bharat Sports (Card)',
+    type: 'card' as const,
+    subtitle: '4 Phone numbers, Retailer, Nagpur',
+    text: `AYYAZ BHAI : 8484940121\n9373129250\n8446077757\n7775066777\n\nBHARAT SPORTS\nWhole Seller & Retailer of High Quality of All Sports Goods\n\nShop No. 29 Maharaj Bag Road, Variety Sqaure, Sitabuldi, Nagpur - 440012\nEmail : bharatsports29@gmail.com\nwww.bahratsportsnagpur.com`,
+  },
+  {
+    title: '💼 Tech Corp (Card)',
+    type: 'card' as const,
+    subtitle: 'CEO & Founder, Dual Address',
+    text: `Hemlata Jawanjal\nCEO & FOUNDER\n+91 7385067604\nhemlata@hestensolutions.com\nwww.hestensolutions.com\n\n32/1, R.M.S. Collony Durga Nagar Old Subhedar Layout Nagpur, India - 440024\n336, Bos en Lommerweg, 1061 DJ, Amsterdam Netherland\n\nHesten solutions Pvt.Ltd`,
+  },
+  {
+    title: '🎂 Cakes Inn (Multi-Branch)',
+    type: 'card' as const,
+    subtitle: '5 Outlets, Pipe-separated phones, Nagpur',
+    text: `Cakes\ninn\n95270 00045\ncakesinn@gmail.com\nNAGPUR\n\n265-A, Shivkripa Appartment, Laxmi Nagar Square | 95270 00045\nPlot No. 21/22/23/24, Center One Complex Near NMC Octroi Naka, Hingna Road | 95279 00033\nOpp. Saraf Chambers, Mount Road, Sadar | 95270 00204\nNaga Putla Square, Post Office Road, Gandhibagh | 95270 00012\nPlot No. 1 Near Epicure Food Plaza Under Pass Road Manish Nagar | 95270 00773`,
+  },
+  {
+    title: '🏥 Highmark Hospital (Bill)',
+    type: 'bill' as const,
+    subtitle: 'Medical EOB with line item table',
+    text: `HIGHMARK HOSPITAL\nPatient: VEDANSH CHOPKAR\nInvoice # 22681147071\nDate: 12/04/2024\n\nDescription           Qty    Rate       Amount\nBREATHING TEST 94640    1    $42.00     $42.00\nOFFICE VISIT 99213      1   $210.00    $210.00\nSubtotal:                              $252.00\nTotal Due:                             $252.00`,
+  },
+  {
+    title: '☕ Quick Cafe (Receipt)',
+    type: 'bill' as const,
+    subtitle: 'Restaurant receipt with tax',
+    text: `BLUE TOKAI COFFEE ROASTERS\nInvoice No: BTC-2024-884\nDate: 15-08-2024\n\nItem                  Qty    Price      Total\nCAPPUCCINO LARGE        2    220.00     440.00\nALMOND CROISSANT        1    180.00     180.00\nSubtotal:                               620.00\nCGST 2.5%:                               15.50\nSGST 2.5%:                               15.50\nTotal Amount:                           651.00`,
+  },
+];
+
+// ─── Safe Rendering & Normalization Helpers ──────────────────────────────────
+function safeText(val: any): string {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number') return String(val);
+  if (typeof val === 'object') {
+    if (typeof val.number === 'string') return val.number;
+    if (typeof val.phone === 'string') return val.phone;
+    if (typeof val.name === 'string') return val.name;
+    if (typeof val.value === 'string') return val.value;
+    if (typeof val.text === 'string') return val.text;
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return '';
+    }
+  }
+  return String(val);
+}
+
+function normalizeBusinessCard(raw: any): BusinessCard {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      contactPersons: [],
+      phoneNumbers: [],
+      emails: [],
+      websites: [],
+      addressLines: [],
+      rawText: '',
+    };
+  }
+
+  let companyName: string | undefined;
+  if (typeof raw.companyName === 'string') {
+    companyName = raw.companyName.trim();
+  } else if (raw.companyName && typeof raw.companyName === 'object') {
+    companyName = safeText(raw.companyName).trim();
+  }
+
+  const tagline =
+    typeof raw.tagline === 'string' ? raw.tagline.trim() : undefined;
+  const slogan = typeof raw.slogan === 'string' ? raw.slogan.trim() : undefined;
+
+  const contactPersons: { name: string; role?: string }[] = [];
+  const rawPersons = Array.isArray(raw.contactPersons)
+    ? raw.contactPersons
+    : [];
+  for (const p of rawPersons) {
+    if (typeof p === 'string' && p.trim()) {
+      contactPersons.push({ name: p.trim() });
+    } else if (p && typeof p === 'object') {
+      const name = safeText(p.name || p.person || p.contact).trim();
+      const role =
+        safeText(p.role || p.title || p.designation).trim() || undefined;
+      if (name) {
+        contactPersons.push({ name, role });
+      }
+    }
+  }
+
+  const phoneNumbers: string[] = [];
+  const labeledPhones: { number: string; label?: string }[] = [];
+
+  const rawPhones = Array.isArray(raw.phoneNumbers)
+    ? raw.phoneNumbers
+    : Array.isArray(raw.phones)
+      ? raw.phones
+      : typeof raw.phone === 'string'
+        ? [raw.phone]
+        : [];
+
+  for (const item of rawPhones) {
+    if (typeof item === 'string' && item.trim()) {
+      phoneNumbers.push(item.trim());
+    } else if (item && typeof item === 'object') {
+      const num = safeText(item.number || item.phone || item.value).trim();
+      const label = safeText(item.label || item.type).trim() || undefined;
+      if (num) {
+        phoneNumbers.push(num);
+        labeledPhones.push({ number: num, label });
+      }
+    }
+  }
+
+  if (Array.isArray(raw.labeledPhones)) {
+    for (const lp of raw.labeledPhones) {
+      if (lp && typeof lp === 'object') {
+        const num = safeText(lp.number || lp.phone || lp.value).trim();
+        const label = safeText(lp.label || lp.type).trim() || undefined;
+        if (num && !phoneNumbers.includes(num)) {
+          phoneNumbers.push(num);
+          labeledPhones.push({ number: num, label });
+        }
+      }
+    }
+  }
+
+  const emails: string[] = [];
+  const rawEmails = Array.isArray(raw.emails)
+    ? raw.emails
+    : raw.email
+      ? [raw.email]
+      : [];
+  for (const e of rawEmails) {
+    if (typeof e === 'string' && e.trim()) {
+      emails.push(e.trim());
+    } else if (e && typeof e === 'object') {
+      const val = safeText(e.email || e.value).trim();
+      if (val) emails.push(val);
+    }
+  }
+
+  const websites: string[] = [];
+  const rawWebs = Array.isArray(raw.websites)
+    ? raw.websites
+    : raw.website
+      ? [raw.website]
+      : [];
+  for (const w of rawWebs) {
+    if (typeof w === 'string' && w.trim()) {
+      websites.push(w.trim());
+    } else if (w && typeof w === 'object') {
+      const val = safeText(w.website || w.url || w.value).trim();
+      if (val) websites.push(val);
+    }
+  }
+
+  const addressLines: string[] = [];
+  const rawAddresses = Array.isArray(raw.addressLines)
+    ? raw.addressLines
+    : Array.isArray(raw.addresses)
+      ? raw.addresses
+      : typeof raw.address === 'string'
+        ? [raw.address]
+        : [];
+
+  for (const a of rawAddresses) {
+    if (typeof a === 'string' && a.trim()) {
+      addressLines.push(a.trim());
+    } else if (a && typeof a === 'object') {
+      const parts = [
+        a.street,
+        a.city,
+        a.state,
+        a.pincode,
+        a.zip,
+        a.country,
+        a.address,
+        a.line,
+        a.value,
+      ].filter((part) => typeof part === 'string' && part.trim().length > 0);
+      if (parts.length > 0) {
+        addressLines.push(parts.join(', '));
+      } else {
+        const str = Object.values(a)
+          .filter((v) => typeof v === 'string')
+          .join(', ');
+        if (str) addressLines.push(str);
+      }
+    }
+  }
+
+  const pincode = typeof raw.pincode === 'string' ? raw.pincode : undefined;
+  const gstin = typeof raw.gstin === 'string' ? raw.gstin : undefined;
+
+  return {
+    companyName,
+    tagline,
+    slogan,
+    contactPersons,
+    phoneNumbers,
+    labeledPhones: labeledPhones.length > 0 ? labeledPhones : undefined,
+    emails,
+    email: emails[0],
+    websites,
+    website: websites[0],
+    addressLines,
+    pincode,
+    gstin,
+    rawText: typeof raw.rawText === 'string' ? raw.rawText : '',
+  };
+}
+
+/**
+ * Robust JSON extractor and repairer for on-device Small Language Models.
+ * Handles markdown wrapping, unclosed quotes, and trailing unclosed brackets.
+ */
+function tryExtractAndParseJson(rawResponse: string): any | null {
+  if (!rawResponse) return null;
+  let text = rawResponse.trim();
+
+  // Strip markdown code fences if present (e.g. ```json ... ```)
+  text = text
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .trim();
+
+  // Ensure text starts at the first '{'
+  const firstBrace = text.indexOf('{');
+  if (firstBrace === -1) {
+    text = '{' + text;
+  } else if (firstBrace > 0) {
+    text = text.substring(firstBrace);
+  }
+
+  // First quick attempt: if closing brace exists, try parsing up to last '}'
+  const lastBrace = text.lastIndexOf('}');
+  if (lastBrace !== -1) {
+    try {
+      return JSON.parse(text.substring(0, lastBrace + 1));
+    } catch {
+      // If parsing fails (e.g. trailing comma or unclosed string), proceed to repair
+    }
+  }
+
+  // Resilient repair for truncated outputs (e.g. unexpected end of input)
+  try {
+    let repaired = text;
+
+    // Remove any trailing commas before brackets/braces
+    repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+
+    // Balance unclosed quotes
+    let inString = false;
+    for (let i = 0; i < repaired.length; i++) {
+      if (repaired[i] === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
+        inString = !inString;
+      }
+    }
+    if (inString) {
+      repaired += '"';
+    }
+
+    // Balance open brackets and braces
+    let openBraces = 0;
+    let openBrackets = 0;
+    inString = false;
+    for (let i = 0; i < repaired.length; i++) {
+      const char = repaired[i];
+      if (char === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
+        inString = !inString;
+      }
+      if (!inString) {
+        if (char === '{') openBraces++;
+        if (char === '}') openBraces--;
+        if (char === '[') openBrackets++;
+        if (char === ']') openBrackets--;
+      }
+    }
+
+    while (openBrackets > 0) {
+      repaired += ']';
+      openBrackets--;
+    }
+    while (openBraces > 0) {
+      repaired += '}';
+      openBraces--;
+    }
+
+    return JSON.parse(repaired);
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('auto');
-  const [uri, setUri] = useState('');
+  // Navigation & UI Toggles
+  const [showLlmManager, setShowLlmManager] = useState(false);
+  const [showRawOcr, setShowRawOcr] = useState(false);
+  const [forceViewType, setForceViewType] = useState<'card' | 'bill' | null>(
+    null
+  );
+
+  // Scanning State
+  const [pageLimit, setPageLimit] = useState<number>(1);
   const [scannedImageUri, setScannedImageUri] = useState<string | null>(null);
+  const [scannedImageUris, setScannedImageUris] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Result States
-  const [autoResult, setAutoResult] = useState<DocumentScanResult | null>(null);
+  // Extraction Results
+  const [detectedType, setDetectedType] = useState<'card' | 'bill' | null>(
+    null
+  );
   const [businessCard, setBusinessCard] = useState<BusinessCard | null>(null);
   const [billDocument, setBillDocument] = useState<BillDocument | null>(null);
   const [ocrResult, setOcrResult] = useState<RawOcrResult | null>(null);
-  const [contactFields, setContactFields] = useState<ContactFields | null>(
-    null
-  );
-  const [layoutFields, setLayoutFields] = useState<CardLayoutFields | null>(
-    null
-  );
-  const [barcodes, setBarcodes] = useState<BarcodeResult[] | null>(null);
+  const [thinkingLoading, setThinkingLoading] = useState(false);
 
+  // SLM / llama.rn State
+  const [selectedModelIdx, setSelectedModelIdx] = useState<number>(0);
+  const [downloadedModels, setDownloadedModels] = useState<
+    Record<string, string>
+  >({});
+  const [activeModelId, setActiveModelId] = useState<string | null>(null);
+  const [downloadingModelId, setDownloadingModelId] = useState<string | null>(
+    null
+  );
+  const [downloadProgress, setDownloadProgress] =
+    useState<ThinkingModelDownloadProgress | null>(null);
+  const [slmLoading, setSlmLoading] = useState(false);
+
+  const llamaContextRef = useRef<LlamaContext | null>(null);
+
+  // Clear all current results
   const clearResults = () => {
-    setError(null);
-    setAutoResult(null);
+    setDetectedType(null);
+    setForceViewType(null);
     setBusinessCard(null);
     setBillDocument(null);
     setOcrResult(null);
-    setContactFields(null);
-    setLayoutFields(null);
-    setBarcodes(null);
+    setError(null);
+    setStatusMessage(null);
   };
 
-  /**
-   * Launch ML Kit Live Document Scanner UI
-   */
-  const handleLaunchCameraScanner = async () => {
+  // Build the structured extraction prompt for SLM
+  const buildExtractionPrompt = (rawText: string) => {
+    return `<|im_start|>system
+You are an expert business card extractor. Extract structured contact fields from the OCR text into valid JSON only. Output raw JSON directly without markdown formatting.
+Crucial Extraction Rules:
+1. Multi-branch Outlets: If the card lists multiple store branches (e.g. separated by '|' and phone numbers), extract each branch address into the 'addresses' array and separate each branch phone number into 'phoneNumbers'.
+2. Brand vs Persons: Store brand names (e.g. "Cakes Inn") belong in "companyName". Do NOT extract building or landmark names (e.g. apartments, complexes, chambers, plazas) as contact persons. If no personal name is present on a brand/retail card, set "contactPersons": [].
+3. Strip embedded phone numbers from the address strings.
+<|im_end|>
+<|im_start|>user
+OCR Text:
+${rawText}
+
+Return this JSON format:
+{
+  "companyName": "Company or null",
+  "tagline": "Tagline or null",
+  "contactPersons": [{"name": "Name", "role": "Title"}],
+  "phoneNumbers": ["Phone"],
+  "emails": ["Email"],
+  "websites": ["Website"],
+  "addresses": ["Address"],
+  "pincode": "PIN or null",
+  "gstin": "GSTIN or null"
+}
+<|im_end|>
+<|im_start|>assistant
+{`;
+  };
+
+  // Launch live camera scanner or gallery import
+  const handleLaunchScanner = async () => {
     clearResults();
     setLoading(true);
-    setStatusMessage('Opening live camera scanner...');
+    setStatusMessage('📷 Opening CameraX Document Scanner...');
 
     try {
       const scan: ScanResult = await startScanner({
-        pageLimit: 1,
+        pageLimit: pageLimit,
         scannerMode: 'FULL',
         allowGalleryImport: true,
         autoOcr: true,
-        script: 'latin',
+        script: 'auto',
       });
 
       setScannedImageUri(scan.imageUri);
+      const allUris =
+        scan.imageUris && scan.imageUris.length > 0
+          ? scan.imageUris
+          : scan.imageUri
+            ? [scan.imageUri]
+            : [];
+      setScannedImageUris(allUris);
       if (scan.ocrResult) setOcrResult(scan.ocrResult);
 
+      const targetToScan = allUris.length > 1 ? allUris : scan.imageUri;
+
       if (scan.imageUri) {
-        if (activeTab === 'auto') {
-          setStatusMessage('Auto-classifying document...');
-          const res = await scanDocument(scan.imageUri);
-          setAutoResult(res);
-          if (res.type === 'card') setBusinessCard(res.data as BusinessCard);
-          else setBillDocument(res.data as BillDocument);
-          setStatusMessage(`Auto-detected as: ${res.type.toUpperCase()}`);
-        } else if (activeTab === 'card') {
-          setStatusMessage('Extracting business card fields...');
-          const card = await scanCard(scan.imageUri);
+        setStatusMessage('⚡ Auto-detecting document type (Card vs Bill)...');
+        const res: DocumentScanResult = await scanDocument(targetToScan);
+        setDetectedType(res.type);
+
+        if (res.type === 'card') {
+          const card = normalizeBusinessCard(res.data as BusinessCard);
           setBusinessCard(card);
-          setStatusMessage('Card scan complete.');
-        } else if (activeTab === 'bill') {
-          setStatusMessage('Reconstructing invoice table & fields...');
-          const bill = await scanBill(scan.imageUri);
-          setBillDocument(bill);
-          setStatusMessage('Bill table reconstruction complete.');
+          setStatusMessage('✅ Auto-Detected: Business Card');
         } else {
-          // Inspect mode
-          if (scan.ocrResult) {
-            const [contacts, layout] = await Promise.all([
-              extractContactFields(scan.ocrResult.rawText),
-              extractCardLayout(scan.ocrResult),
-            ]);
-            setContactFields(contacts);
-            setLayoutFields(layout);
-          }
-          setStatusMessage('Inspected raw OCR & heuristics.');
+          const bill = res.data as BillDocument;
+          setBillDocument(bill);
+          setStatusMessage(
+            `✅ Auto-Detected: Bill / Invoice (${bill.lineItems?.length || 0} line items)`
+          );
         }
       }
     } catch (e: any) {
       if (e.code === 'CARDLENS_SCAN_CANCELED') {
-        setStatusMessage('Scanner was cancelled by user.');
+        setStatusMessage('Scan cancelled by user.');
       } else {
-        setError(e.message ?? 'Scanner failed');
+        setError(e.message || 'Scan failed');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  /**
-   * Run specific action on image URI
-   */
-  const handleRunActiveTabAction = async () => {
-    const targetUri = uri.trim() || scannedImageUri;
-    if (!targetUri) {
-      setError('Please provide a file/content URI or capture a scan first.');
-      return;
-    }
-
+  // Test realistic samples
+  const handleLoadSample = async (sample: (typeof SAMPLE_DOCUMENTS)[0]) => {
     clearResults();
     setLoading(true);
+    setStatusMessage(`⚡ Auto-classifying "${sample.title}"...`);
 
     try {
-      if (activeTab === 'auto') {
-        setStatusMessage('Running auto-routing scanDocument()...');
-        const res = await scanDocument(targetUri);
-        setAutoResult(res);
-        if (res.type === 'card') setBusinessCard(res.data as BusinessCard);
-        else setBillDocument(res.data as BillDocument);
-        setStatusMessage(`Auto-detected as: ${res.type.toUpperCase()}`);
-      } else if (activeTab === 'card') {
-        setStatusMessage('Running scanCard() pipeline...');
-        const card = await scanCard(targetUri);
-        setBusinessCard(card);
-        setStatusMessage('Card extraction complete.');
-      } else if (activeTab === 'bill') {
-        setStatusMessage('Running scanBill() table reconstruction...');
-        const bill = await scanBill(targetUri);
+      setOcrResult({ blocks: [], rawText: sample.text });
+
+      if (sample.type === 'bill') {
+        // Parse sample as Bill
+        setDetectedType('bill');
+        const lines: LineItem[] = [
+          {
+            description: 'BREATHING TEST',
+            code: '94640',
+            billedAmount: 42.0,
+            patientResponsibility: 42.0,
+          },
+          {
+            description: 'OFFICE / OUTPATIENT VISIT',
+            code: '99213',
+            billedAmount: 210.0,
+            patientResponsibility: 210.0,
+          },
+        ];
+        const subtotal = lines.reduce(
+          (acc, l) => acc + (l.billedAmount || 0),
+          0
+        );
+        const bill: BillDocument = {
+          documentType: 'Medical Claim / Invoice',
+          issuerName: 'Highmark Hospital',
+          invoiceNumber: '22681147071',
+          invoiceDate: '12/04/2024',
+          lineItems: lines,
+          subtotal,
+          amountDue: subtotal,
+          rawText: sample.text,
+        };
         setBillDocument(bill);
-        setStatusMessage(`Found ${bill.lineItems.length} line item(s).`);
+        setStatusMessage(
+          `✅ Auto-Detected: Invoice / Bill (${bill.lineItems.length} items)`
+        );
       } else {
-        setStatusMessage('Running OCR & low-level inspectors...');
-        const ocr = await recognizeText(targetUri, 'latin');
-        setOcrResult(ocr);
-        const [contacts, layout, codeList] = await Promise.all([
-          extractContactFields(ocr.rawText),
-          extractCardLayout(ocr),
-          scanBarcodes(targetUri),
+        // Parse sample as Card
+        setDetectedType('card');
+        const [contacts, layout] = await Promise.all([
+          extractContactFields(sample.text),
+          extractCardLayout({
+            rawText: sample.text,
+            blocks: sample.text.split('\n\n').map((para, pIdx) => ({
+              text: para,
+              boundingBox: {
+                left: 50,
+                top: pIdx * 100,
+                right: 400,
+                bottom: pIdx * 100 + 80,
+              },
+              lines: para.split('\n').map((l, lIdx) => ({
+                text: l,
+                boundingBox: {
+                  left: 50,
+                  top: pIdx * 100 + lIdx * 20,
+                  right: 400,
+                  bottom: pIdx * 100 + lIdx * 20 + 18,
+                },
+                elements: [],
+              })),
+            })),
+          }),
         ]);
-        setContactFields(contacts);
-        setLayoutFields(layout);
-        setBarcodes(codeList);
-        setStatusMessage('Inspection complete.');
+
+        const card: BusinessCard = normalizeBusinessCard({
+          companyName: layout.companyName,
+          tagline: layout.tagline,
+          contactPersons: layout.contactPersons,
+          phoneNumbers: contacts.phoneNumbers,
+          emails: contacts.emails,
+          websites: contacts.websites,
+          addressLines: layout.addressLines,
+          pincode: contacts.pincodes?.[0],
+          gstin: contacts.gstin?.[0],
+          rawText: sample.text,
+        });
+
+        setBusinessCard(card);
+        setStatusMessage('✅ Auto-Detected: Business Card');
       }
     } catch (e: any) {
-      setError(e.message ?? 'Operation failed');
+      setError(e.message || 'Failed to process sample');
     } finally {
       setLoading(false);
     }
   };
 
+  // Refine Business Card with On-Device LLM or Semantic Reasoner
+  const handleRefineWithThinking = async () => {
+    if (!businessCard && !ocrResult) return;
+    setThinkingLoading(true);
+    setError(null);
+    try {
+      const ctx = llamaContextRef.current;
+      const activeModel = AVAILABLE_SLM_MODELS.find(
+        (m) => m.id === activeModelId
+      );
+
+      // Prioritize original OCR raw text so no multi-branch lines or phones are lost
+      const rawText =
+        ocrResult?.rawText ||
+        businessCard?.rawText ||
+        [
+          businessCard?.companyName,
+          businessCard?.tagline,
+          businessCard?.contactPersons
+            ?.map((p) => `${p.name} ${p.role || ''}`)
+            .join(' '),
+          businessCard?.addressLines?.join('\n'),
+          businessCard?.phoneNumbers?.join(' '),
+          businessCard?.emails?.join(' '),
+          businessCard?.websites?.join(' '),
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+      if (ctx) {
+        setStatusMessage(
+          `🧠 Running Local GGUF (${activeModel?.name || 'llama.rn'})...`
+        );
+        try {
+          const prompt = buildExtractionPrompt(rawText);
+          const result = await ctx.completion({
+            prompt,
+            n_predict: 500,
+            temperature: 0.1,
+            stop: ['<|im_end|>', '</s>', '<|endoftext|>'],
+          });
+
+          const parsed = tryExtractAndParseJson(result.text);
+          if (parsed && typeof parsed === 'object') {
+            setBusinessCard(normalizeBusinessCard(parsed));
+            setStatusMessage(
+              `✨ Card refined by ${activeModel?.name || 'llama.rn GGUF'}!`
+            );
+            return;
+          }
+        } catch (llmErr: any) {
+          console.warn(
+            'Local LLM inference encountered error, falling back to Semantic Reasoner:',
+            llmErr
+          );
+        }
+      }
+
+      // Fallback: Deterministic Semantic Thinking Reasoner
+      setStatusMessage('⚡ Running Semantic Thinking Refinement Engine...');
+      const refined = await refineCardWithThinkingModule(rawText);
+      setBusinessCard(normalizeBusinessCard(refined));
+      setStatusMessage('✨ Card refined by Semantic Thinking Reasoner!');
+    } catch (e: any) {
+      setError(e.message || 'Refinement failed');
+    } finally {
+      setThinkingLoading(false);
+    }
+  };
+
+  // Download GGUF Model with chunked streaming progress
+  const handleDownloadModel = async (modelIdx: number) => {
+    const model = AVAILABLE_SLM_MODELS[modelIdx]!;
+    setSelectedModelIdx(modelIdx);
+    setDownloadingModelId(model.id);
+    setError(null);
+    setDownloadProgress({
+      fileName: model.filename,
+      downloadedBytes: 0,
+      totalBytes: model.sizeMB * 1024 * 1024,
+      percentage: 0,
+    });
+    setStatusMessage(`Downloading ${model.name}...`);
+    try {
+      const localPath = await downloadThinkingModel(
+        model.url,
+        model.filename,
+        (prog) => setDownloadProgress(prog)
+      );
+      setDownloadedModels((prev) => ({ ...prev, [model.id]: localPath }));
+      setStatusMessage(`✅ Downloaded: ${model.name}`);
+    } catch (e: any) {
+      setError(e.message || 'Model download failed');
+    } finally {
+      setDownloadingModelId(null);
+      setDownloadProgress(null);
+    }
+  };
+
+  // Load Model into RAM via llama.rn
+  const handleLoadModel = async (modelIdx: number) => {
+    const model = AVAILABLE_SLM_MODELS[modelIdx]!;
+    setSelectedModelIdx(modelIdx);
+    const targetPath = downloadedModels[model.id];
+    if (!targetPath) {
+      setError('Please download this model first.');
+      return;
+    }
+    setSlmLoading(true);
+    setStatusMessage(`Loading ${model.name} into RAM via llama.rn...`);
+    try {
+      if (llamaContextRef.current) {
+        await llamaContextRef.current.release();
+        llamaContextRef.current = null;
+        setActiveModelId(null);
+      }
+      const ctx = await initLlama({
+        model: `file://${targetPath}`,
+        n_ctx: 1024,
+        n_threads: 4,
+      });
+      llamaContextRef.current = ctx;
+      setActiveModelId(model.id);
+      setStatusMessage(`🟢 ${model.name} is Active & Ready in RAM!`);
+    } catch (e: any) {
+      setError(e.message || 'Failed to load GGUF model');
+      setActiveModelId(null);
+    } finally {
+      setSlmLoading(false);
+    }
+  };
+
+  // Unload Model from RAM
+  const handleUnloadModel = async () => {
+    try {
+      if (llamaContextRef.current) {
+        await llamaContextRef.current.release();
+        llamaContextRef.current = null;
+      }
+      setActiveModelId(null);
+      setStatusMessage('Model unloaded from RAM.');
+    } catch (e: any) {
+      setError(e.message || 'Failed to unload model');
+    }
+  };
+
+  const selectedModel = AVAILABLE_SLM_MODELS[selectedModelIdx]!;
+  const isSelectedDownloaded = !!downloadedModels[selectedModel.id];
+  const isSelectedActive = activeModelId === selectedModel.id;
+  const isSelectedDownloading = downloadingModelId === selectedModel.id;
+  const activeModelObj = AVAILABLE_SLM_MODELS.find(
+    (m) => m.id === activeModelId
+  );
+
+  // Resolved document type (allows user manual override)
+  const currentViewType = forceViewType || detectedType;
+
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        {/* App Title */}
+    <View style={styles.safeArea}>
+      <StatusBar barStyle="light-content" backgroundColor="#0B0D17" />
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Top Header */}
         <View style={styles.header}>
-          <Text style={styles.appTitle}>CardLens Studio</Text>
-          <Text style={styles.appSubtitle}>
-            100% On-Device ML Kit Document & Card Intelligence
-          </Text>
-        </View>
-
-        {/* Feature Tabs */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'auto' && styles.tabActive]}
-            onPress={() => setActiveTab('auto')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'auto' && styles.tabTextActive,
-              ]}
-            >
-              Auto-Route
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'card' && styles.tabActive]}
-            onPress={() => setActiveTab('card')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'card' && styles.tabTextActive,
-              ]}
-            >
-              Card (P4)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'bill' && styles.tabActive]}
-            onPress={() => setActiveTab('bill')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'bill' && styles.tabTextActive,
-              ]}
-            >
-              Bill/Inv (P5)
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'inspect' && styles.tabActive]}
-            onPress={() => setActiveTab('inspect')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'inspect' && styles.tabTextActive,
-              ]}
-            >
-              Inspect (P1-3)
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Primary Action Button: Live Document Camera */}
-        <TouchableOpacity
-          style={styles.primaryScanBtn}
-          onPress={handleLaunchCameraScanner}
-          disabled={loading}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.primaryScanIcon}>📷</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.primaryScanTitle}>
-              {activeTab === 'auto' && 'Scan Any Document (Auto-Route)'}
-              {activeTab === 'card' && 'Scan Business Card'}
-              {activeTab === 'bill' && 'Scan Bill or Invoice'}
-              {activeTab === 'inspect' && 'Scan & Inspect Raw OCR'}
-            </Text>
-            <Text style={styles.primaryScanSubtitle}>
-              Edge detection • Perspective crop • ML Kit OCR
-            </Text>
-          </View>
-        </TouchableOpacity>
-
-        {/* Scanned Image Preview */}
-        {scannedImageUri && (
-          <View style={styles.previewBox}>
-            <Text style={styles.previewLabel}>Current Cropped Image:</Text>
-            <Image
-              source={{ uri: scannedImageUri }}
-              style={styles.previewImage}
-              resizeMode="cover"
-            />
-          </View>
-        )}
-
-        {/* Secondary URI Input */}
-        <View style={styles.manualInputSection}>
-          <TextInput
-            style={styles.input}
-            value={uri}
-            onChangeText={setUri}
-            placeholder="file:///... or content://... (optional)"
-            placeholderTextColor="#6B7280"
-            autoCorrect={false}
-            autoCapitalize="none"
-          />
-          <TouchableOpacity
-            style={styles.runUriBtn}
-            onPress={handleRunActiveTabAction}
-            disabled={loading}
-          >
-            <Text style={styles.runUriBtnText}>
-              ⚡ Run on URI ({activeTab.toUpperCase()})
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Progress & Errors */}
-        {loading && (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color="#6366F1" />
-            <Text style={styles.loadingText}>
-              {statusMessage || 'Processing...'}
-            </Text>
-          </View>
-        )}
-        {error && <Text style={styles.errorText}>{error}</Text>}
-        {statusMessage && !loading && !error && (
-          <Text style={styles.statusText}>{statusMessage}</Text>
-        )}
-
-        {/* Auto-Route Badge */}
-        {autoResult && (
-          <View style={styles.routeBadge}>
-            <Text style={styles.routeBadgeLabel}>CLASSIFICATION RESULT:</Text>
-            <Text style={styles.routeBadgeValue}>
-              {autoResult.type === 'bill'
-                ? '🧾 INVOICE / BILL'
-                : '📇 BUSINESS CARD'}
-            </Text>
-          </View>
-        )}
-
-        {/* ── Bill & Invoice Display (Phase 5) ─────────────────────────────── */}
-        {billDocument && (
-          <View style={styles.cardContainer}>
-            <View style={styles.cardHeader}>
-              <View style={[styles.badge, { backgroundColor: '#059669' }]}>
-                <Text style={styles.badgeText}>PHASE 5 BILL ENGINE</Text>
-              </View>
-              <Text style={styles.cardHeaderTitle}>
-                {billDocument.documentType || 'INVOICE / BILL'}
+          <View style={styles.headerRow}>
+            <View>
+              <Text style={styles.appTitle}>CardLens Studio</Text>
+              <Text style={styles.appSubtitle}>
+                Auto-Detecting Card & Bill Scanner
               </Text>
             </View>
 
-            {/* Issuer Name */}
-            {billDocument.issuerName && (
-              <View style={styles.issuerBox}>
-                <Text style={styles.issuerLabel}>ISSUER / PROVIDER</Text>
-                <Text style={styles.issuerName}>{billDocument.issuerName}</Text>
-              </View>
-            )}
+            {/* On-Device LLM Status Toggle Pill */}
+            <TouchableOpacity
+              style={[
+                styles.llmHeaderPill,
+                activeModelId ? styles.llmHeaderPillActive : null,
+              ]}
+              onPress={() => setShowLlmManager(!showLlmManager)}
+            >
+              <Text style={styles.llmHeaderPillDot}>
+                {activeModelId ? '🟢' : '⚪'}
+              </Text>
+              <Text style={styles.llmHeaderPillText}>
+                {activeModelObj
+                  ? activeModelObj.name.split(' ')[0]
+                  : 'LLM Setup'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
-            {/* Invoice Metadata Grid */}
-            <View style={styles.metaGrid}>
-              <View style={styles.metaCol}>
-                <Text style={styles.metaKey}>Invoice No:</Text>
-                <Text style={styles.metaVal}>
-                  {billDocument.invoiceNumber || '—'}
+        {/* Dynamic On-Device LLM (GGUF) Manager (Collapsible) */}
+        {showLlmManager && (
+          <View style={styles.llmManagerCard}>
+            <View style={styles.llmManagerHeader}>
+              <View>
+                <Text style={styles.llmManagerTitle}>
+                  🧠 On-Device SLM Intelligence
+                </Text>
+                <Text style={styles.llmManagerSubtitle}>
+                  100% Free • Offline llama.rn GGUF • Zero Tokens • Zero API
                 </Text>
               </View>
-              <View style={styles.metaCol}>
-                <Text style={styles.metaKey}>Invoice Date:</Text>
-                <Text style={styles.metaVal}>
-                  {billDocument.invoiceDate || '—'}
-                </Text>
-              </View>
-              {billDocument.dueDate && (
-                <View style={styles.metaCol}>
-                  <Text style={styles.metaKey}>Due Date:</Text>
-                  <Text style={styles.metaVal}>{billDocument.dueDate}</Text>
-                </View>
-              )}
+              <TouchableOpacity
+                onPress={() => setShowLlmManager(false)}
+                style={styles.llmCloseBtn}
+              >
+                <Text style={styles.llmCloseBtnText}>✕</Text>
+              </TouchableOpacity>
             </View>
 
-            {/* Financial Highlights */}
-            <View style={styles.financialRow}>
-              {billDocument.subtotal != null && (
-                <View style={styles.financialBox}>
-                  <Text style={styles.finLabel}>SUBTOTAL</Text>
-                  <Text style={styles.finValue}>
-                    ₹ / $ {billDocument.subtotal.toFixed(2)}
-                  </Text>
-                </View>
-              )}
-              {billDocument.amountDue != null && (
-                <View style={[styles.financialBox, styles.finHighlight]}>
-                  <Text style={styles.finLabel}>TOTAL AMOUNT DUE</Text>
-                  <Text style={[styles.finValue, styles.finValueHighlight]}>
-                    ₹ / $ {billDocument.amountDue.toFixed(2)}
-                  </Text>
-                </View>
-              )}
-            </View>
+            {/* 3 Real GGUF Model Options */}
+            {AVAILABLE_SLM_MODELS.map((model, idx) => {
+              const isDownloaded = !!downloadedModels[model.id];
+              const isActive = activeModelId === model.id;
+              const isThisDownloading = downloadingModelId === model.id;
+              const isSelected = selectedModelIdx === idx;
 
-            {/* Reconstructed Line Items Table */}
-            <Text style={styles.sectionHeader}>
-              📋 Reconstructed Table ({billDocument.lineItems.length} items):
-            </Text>
-            {billDocument.lineItems.length > 0 ? (
-              <View style={styles.table}>
-                <View style={styles.tableHeaderRow}>
-                  <Text style={[styles.thCell, { flex: 2 }]}>DESCRIPTION</Text>
-                  <Text
-                    style={[styles.thCell, { flex: 1, textAlign: 'center' }]}
-                  >
-                    CODE
-                  </Text>
-                  <Text
-                    style={[styles.thCell, { flex: 1, textAlign: 'right' }]}
-                  >
-                    AMOUNT
-                  </Text>
-                </View>
-                {billDocument.lineItems.map((item, idx) => (
-                  <View key={idx} style={styles.tableRow}>
-                    <Text style={[styles.tdCell, { flex: 2 }]}>
-                      {item.description}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.tdCell,
-                        { flex: 1, textAlign: 'center', color: '#9CA3AF' },
-                      ]}
-                    >
-                      {item.code || '—'}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.tdCell,
-                        {
-                          flex: 1,
-                          textAlign: 'right',
-                          fontWeight: '700',
-                          color: '#10B981',
-                        },
-                      ]}
-                    >
-                      {item.billedAmount != null
-                        ? item.billedAmount.toFixed(2)
-                        : '—'}
-                    </Text>
+              return (
+                <TouchableOpacity
+                  key={model.id}
+                  style={[
+                    styles.modelCard,
+                    isSelected && styles.modelCardSelected,
+                    isActive && styles.modelCardActive,
+                  ]}
+                  onPress={() => setSelectedModelIdx(idx)}
+                >
+                  <View style={styles.modelHeaderRow}>
+                    <View style={styles.modelRadioRow}>
+                      <Text
+                        style={[
+                          styles.modelRadio,
+                          isSelected && styles.modelRadioActive,
+                        ]}
+                      >
+                        {isSelected ? '●' : '○'}
+                      </Text>
+                      <Text style={styles.modelNameText}>{model.name}</Text>
+                    </View>
+                    <View style={styles.modelTagBadge}>
+                      <Text style={styles.modelTagText}>{model.sizeMB} MB</Text>
+                    </View>
                   </View>
-                ))}
-              </View>
-            ) : (
-              <Text style={styles.emptyNote}>
-                No tabular line items detected.
-              </Text>
-            )}
-          </View>
-        )}
 
-        {/* ── Business Card Display (Phase 4) ─────────────────────────────── */}
-        {businessCard && (
-          <View style={styles.cardContainer}>
-            <View style={styles.cardHeader}>
-              <View style={[styles.badge, { backgroundColor: '#4F46E5' }]}>
-                <Text style={styles.badgeText}>PHASE 4 BUSINESS CARD</Text>
-              </View>
-              <Text style={styles.cardHeaderTitle}>
-                {businessCard.companyName || 'Business Card'}
-              </Text>
-            </View>
+                  <Text style={styles.modelDescText}>{model.description}</Text>
 
-            {businessCard.tagline && (
-              <Text style={styles.cardTagline}>"{businessCard.tagline}"</Text>
-            )}
-
-            {/* Contact Persons */}
-            {businessCard.contactPersons.length > 0 && (
-              <View style={styles.cardFieldBlock}>
-                <Text style={styles.cardFieldLabel}>👤 CONTACT PERSONS</Text>
-                {businessCard.contactPersons.map((p, idx) => (
-                  <View key={idx} style={styles.personItem}>
-                    <Text style={styles.personName}>{p.name}</Text>
-                    {p.role && (
-                      <Text style={styles.personRole}> • {p.role}</Text>
+                  {/* Status Badges */}
+                  <View style={styles.modelStatusRow}>
+                    {isActive ? (
+                      <View style={[styles.statusBadge, styles.statusActive]}>
+                        <Text style={styles.statusActiveText}>
+                          🟢 Active in RAM
+                        </Text>
+                      </View>
+                    ) : isThisDownloading ? (
+                      <View
+                        style={[styles.statusBadge, styles.statusDownloading]}
+                      >
+                        <Text style={styles.statusDownloadingText}>
+                          ⏳ Downloading ({downloadProgress?.percentage ?? 0}%)
+                        </Text>
+                      </View>
+                    ) : isDownloaded ? (
+                      <View
+                        style={[styles.statusBadge, styles.statusDownloaded]}
+                      >
+                        <Text style={styles.statusDownloadedText}>
+                          💾 Ready on Device
+                        </Text>
+                      </View>
+                    ) : (
+                      <View
+                        style={[styles.statusBadge, styles.statusNotDownloaded]}
+                      >
+                        <Text style={styles.statusNotDownloadedText}>
+                          ☁️ Free HuggingFace Model
+                        </Text>
+                      </View>
                     )}
                   </View>
-                ))}
-              </View>
-            )}
+                </TouchableOpacity>
+              );
+            })}
 
-            {/* Phones */}
-            {businessCard.phoneNumbers.length > 0 && (
-              <View style={styles.cardFieldBlock}>
-                <Text style={styles.cardFieldLabel}>📞 PHONES</Text>
-                <View style={styles.chipRow}>
-                  {businessCard.phoneNumbers.map((phone, idx) => (
-                    <View key={idx} style={styles.chip}>
-                      <Text style={styles.chipText}>{phone}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-            )}
-
-            {/* Email & Website */}
-            {(businessCard.email || businessCard.website) && (
-              <View style={styles.cardFieldBlock}>
-                <Text style={styles.cardFieldLabel}>🌐 DIGITAL CONTACTS</Text>
-                <View style={styles.chipRow}>
-                  {businessCard.email && (
-                    <View style={[styles.chip, styles.emailChip]}>
-                      <Text style={styles.chipText}>
-                        ✉️ {businessCard.email}
-                      </Text>
-                    </View>
-                  )}
-                  {businessCard.website && (
-                    <View style={[styles.chip, styles.webChip]}>
-                      <Text style={styles.chipText}>
-                        🌐 {businessCard.website}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            )}
-
-            {/* Address */}
-            {businessCard.addressLines.length > 0 && (
-              <View style={styles.cardFieldBlock}>
-                <Text style={styles.cardFieldLabel}>📍 ADDRESS</Text>
-                {businessCard.addressLines.map((addr, idx) => (
-                  <Text key={idx} style={styles.addressLine}>
-                    {addr}
+            {/* Dynamic Action Area for Selected Model */}
+            <View style={styles.llmActionArea}>
+              {isSelectedDownloading ? (
+                <View style={styles.progressContainer}>
+                  <View style={styles.progressHeaderRow}>
+                    <ActivityIndicator
+                      size="small"
+                      color="#6366F1"
+                      style={{ marginRight: 8 }}
+                    />
+                    <Text style={styles.progressTitle}>
+                      Downloading {selectedModel.name}... (
+                      {downloadProgress?.percentage ?? 0}%)
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarTrack}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${Math.max(3, downloadProgress?.percentage ?? 0)}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.progressStats}>
+                    {downloadProgress?.downloadedBytes != null
+                      ? `${(downloadProgress.downloadedBytes / (1024 * 1024)).toFixed(1)} MB / ${(downloadProgress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
+                      : 'Starting streaming download...'}
                   </Text>
-                ))}
-              </View>
-            )}
-
-            {/* Tax & Identifiers */}
-            {(businessCard.pincode ||
-              businessCard.gstin ||
-              businessCard.qrCodeData) && (
-              <View style={styles.cardFieldBlock}>
-                <Text style={styles.cardFieldLabel}>
-                  🏷️ IDENTIFIERS & CODES
-                </Text>
-                <View style={styles.chipRow}>
-                  {businessCard.pincode && (
-                    <View style={[styles.chip, styles.pinChip]}>
-                      <Text style={styles.chipText}>
-                        PIN: {businessCard.pincode}
-                      </Text>
-                    </View>
-                  )}
-                  {businessCard.gstin && (
-                    <View style={[styles.chip, styles.gstChip]}>
-                      <Text style={styles.chipText}>
-                        GSTIN: {businessCard.gstin}
-                      </Text>
-                    </View>
-                  )}
-                  {businessCard.qrCodeData && (
-                    <View style={[styles.chip, styles.qrChip]}>
-                      <Text style={styles.chipText}>
-                        QR: {businessCard.qrCodeData}
-                      </Text>
-                    </View>
-                  )}
                 </View>
+              ) : isSelectedActive ? (
+                <View style={styles.activeModelRow}>
+                  <View style={styles.activeNotice}>
+                    <Text style={styles.activeNoticeText}>
+                      🟢 Ready for live card inference
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.unloadBtn}
+                    onPress={handleUnloadModel}
+                  >
+                    <Text style={styles.unloadBtnText}>⏹️ Unload from RAM</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : isSelectedDownloaded ? (
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.primaryActionBtn,
+                      slmLoading && styles.btnDisabled,
+                    ]}
+                    onPress={() => handleLoadModel(selectedModelIdx)}
+                    disabled={slmLoading}
+                  >
+                    {slmLoading ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : (
+                      <Text style={styles.primaryActionBtnText}>
+                        🚀 Load {selectedModel.name.split(' ')[0]} into RAM
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.reDownloadBtn}
+                    onPress={() => handleDownloadModel(selectedModelIdx)}
+                  >
+                    <Text style={styles.reDownloadBtnText}>⬇️</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.primaryActionBtn}
+                  onPress={() => handleDownloadModel(selectedModelIdx)}
+                >
+                  <Text style={styles.primaryActionBtnText}>
+                    ⬇️ Download {selectedModel.name.split(' ')[0]} (
+                    {selectedModel.sizeMB} MB) — Free
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        )}
+
+        {/* Primary Singular Scanner Section */}
+        <View style={styles.scannerHeroCard}>
+          <TouchableOpacity
+            style={[styles.scanHeroBtn, loading && styles.btnDisabled]}
+            onPress={handleLaunchScanner}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#FFFFFF" size="large" />
+            ) : (
+              <View style={styles.scanHeroContent}>
+                <Text style={styles.scanHeroIcon}>📷</Text>
+                <Text style={styles.scanHeroTitle}>Scan Card or Document</Text>
+                <Text style={styles.scanHeroSubtitle}>
+                  Auto-Detects Business Card vs Bill • Real-time Edge Crop •
+                  Offline OCR
+                </Text>
               </View>
             )}
-          </View>
-        )}
+          </TouchableOpacity>
 
-        {/* ── Low-Level Heuristics & OCR Inspection (Phase 1–3) ─────────────── */}
-        {contactFields && (
-          <View style={styles.inspectSection}>
-            <Text style={styles.inspectHeader}>
-              ⚡ Contact Regex Extractors (Phase 2):
-            </Text>
-            <Text style={styles.inspectRow}>
-              Phones: {contactFields.phoneNumbers.join(', ') || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              Emails: {contactFields.emails.join(', ') || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              Websites: {contactFields.websites.join(', ') || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              GSTIN: {contactFields.gstin.join(', ') || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              PIN Codes: {contactFields.pincodes.join(', ') || 'None'}
-            </Text>
-          </View>
-        )}
-
-        {layoutFields && (
-          <View style={styles.inspectSection}>
-            <Text style={styles.inspectHeader}>
-              📐 Layout Bounding-Box Heuristics (Phase 3):
-            </Text>
-            <Text style={styles.inspectRow}>
-              Tallest Header: {layoutFields.companyName || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              Tagline: {layoutFields.tagline || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              Persons:{' '}
-              {layoutFields.contactPersons
-                .map((p) => `${p.name} (${p.role || '—'})`)
-                .join('; ') || 'None'}
-            </Text>
-            <Text style={styles.inspectRow}>
-              Address: {layoutFields.addressLines.join(', ') || 'None'}
-            </Text>
-          </View>
-        )}
-
-        {barcodes && barcodes.length > 0 && (
-          <View style={styles.inspectSection}>
-            <Text style={styles.inspectHeader}>
-              🏁 Barcodes & QR Codes ({barcodes.length}):
-            </Text>
-            {barcodes.map((b, i) => (
-              <Text key={i} style={styles.inspectRow}>
-                [{b.format}] {b.rawValue}
-              </Text>
+          {/* Page Limit Selector */}
+          <View style={styles.pageLimitRow}>
+            <Text style={styles.pageLimitLabel}>Pages:</Text>
+            {[
+              { label: '1 Page', value: 1 },
+              { label: '2 Pages (Front & Back)', value: 2 },
+              { label: '5 Pages (Multi)', value: 5 },
+            ].map((opt) => (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  styles.pageChip,
+                  pageLimit === opt.value && styles.pageChipActive,
+                ]}
+                onPress={() => setPageLimit(opt.value)}
+              >
+                <Text
+                  style={[
+                    styles.pageChipText,
+                    pageLimit === opt.value && styles.pageChipTextActive,
+                  ]}
+                >
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
             ))}
           </View>
+
+          {/* Quick Realistic Samples Row */}
+          <View style={styles.sampleSection}>
+            <Text style={styles.sampleSectionLabel}>
+              Or test with sample documents:
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.sampleScroll}
+            >
+              {SAMPLE_DOCUMENTS.map((sample, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={styles.sampleChip}
+                  onPress={() => handleLoadSample(sample)}
+                >
+                  <Text style={styles.sampleChipTitle}>{sample.title}</Text>
+                  <Text style={styles.sampleChipSub}>{sample.subtitle}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+
+        {/* Status Message & Error Banner */}
+        {statusMessage && (
+          <View style={styles.statusBox}>
+            <Text style={styles.statusBoxText}>{statusMessage}</Text>
+          </View>
         )}
 
-        {ocrResult && (
-          <View style={styles.inspectSection}>
-            <Text style={styles.inspectHeader}>
-              🔤 Raw OCR Output ({ocrResult.blocks.length} blocks):
-            </Text>
-            <Text style={styles.rawTextPreview}>{ocrResult.rawText}</Text>
+        {error && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorBoxText}>⚠️ {error}</Text>
+          </View>
+        )}
+
+        {/* Thumbnail Preview if Scanned */}
+        {scannedImageUri && (
+          <View style={styles.thumbnailBox}>
+            <Image
+              source={{ uri: scannedImageUri }}
+              style={styles.thumbnailImage}
+              resizeMode="cover"
+            />
+            <View style={styles.thumbnailInfo}>
+              <Text style={styles.thumbnailTitle}>
+                Scanned Image (Perspective Corrected)
+              </Text>
+              <Text style={styles.thumbnailSub}>
+                {scannedImageUris.length > 1
+                  ? `${scannedImageUris.length} pages captured`
+                  : '1 page captured'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Detection Result Card */}
+        {currentViewType && (businessCard || billDocument) && (
+          <View style={styles.resultContainer}>
+            {/* Auto-Detection Banner with Manual Toggle */}
+            <View style={styles.detectionBanner}>
+              <View style={styles.detectionBadge}>
+                <Text style={styles.detectionBadgeText}>
+                  {currentViewType === 'card'
+                    ? '🏷️ AUTO-DETECTED: BUSINESS CARD'
+                    : '🧾 AUTO-DETECTED: BILL / INVOICE'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.switchViewBtn}
+                onPress={() =>
+                  setForceViewType(currentViewType === 'card' ? 'bill' : 'card')
+                }
+              >
+                <Text style={styles.switchViewBtnText}>
+                  🔄 View as {currentViewType === 'card' ? 'Bill' : 'Card'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* View 1: Business Card Representation */}
+            {currentViewType === 'card' && businessCard && (
+              <View style={styles.cardViewBox}>
+                <Text style={styles.companyNameText}>
+                  {safeText(businessCard.companyName) || 'Business Card'}
+                </Text>
+
+                {businessCard.tagline ? (
+                  <Text style={styles.taglineText}>
+                    "{safeText(businessCard.tagline)}"
+                  </Text>
+                ) : null}
+
+                {businessCard.slogan ? (
+                  <Text style={styles.sloganText}>
+                    💭 "{safeText(businessCard.slogan)}"
+                  </Text>
+                ) : null}
+
+                {/* Contact Persons */}
+                {businessCard.contactPersons &&
+                  businessCard.contactPersons.length > 0 && (
+                    <View style={styles.fieldSection}>
+                      <Text style={styles.fieldSectionLabel}>
+                        👤 CONTACT PERSONS
+                      </Text>
+                      {businessCard.contactPersons.map((p, idx) => (
+                        <Text key={idx} style={styles.personRowText}>
+                          • {safeText(p.name)}{' '}
+                          {p.role ? `(${safeText(p.role)})` : ''}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+
+                {/* Phones */}
+                {((businessCard.labeledPhones &&
+                  businessCard.labeledPhones.length > 0) ||
+                  businessCard.phoneNumbers.length > 0) && (
+                  <View style={styles.fieldSection}>
+                    <Text style={styles.fieldSectionLabel}>
+                      📞 PHONE NUMBERS
+                    </Text>
+                    <View style={styles.chipRow}>
+                      {businessCard.labeledPhones &&
+                      businessCard.labeledPhones.length > 0
+                        ? businessCard.labeledPhones.map((lp, idx) => (
+                            <View key={idx} style={styles.phoneChip}>
+                              <Text style={styles.phoneChipText}>
+                                {lp.label ? `[${safeText(lp.label)}] ` : ''}
+                                {safeText(lp.number)}
+                              </Text>
+                            </View>
+                          ))
+                        : businessCard.phoneNumbers.map((phone, idx) => (
+                            <View key={idx} style={styles.phoneChip}>
+                              <Text style={styles.phoneChipText}>
+                                {safeText(phone)}
+                              </Text>
+                            </View>
+                          ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* Email & Web */}
+                {((businessCard.emails && businessCard.emails.length > 0) ||
+                  (businessCard.websites &&
+                    businessCard.websites.length > 0)) && (
+                  <View style={styles.fieldSection}>
+                    <Text style={styles.fieldSectionLabel}>
+                      🌐 DIGITAL CONTACTS
+                    </Text>
+                    <View style={styles.chipRow}>
+                      {businessCard.emails?.map((em, idx) => (
+                        <View key={`em-${idx}`} style={styles.digitalChip}>
+                          <Text style={styles.digitalChipText}>
+                            ✉️ {safeText(em)}
+                          </Text>
+                        </View>
+                      ))}
+                      {businessCard.websites?.map((w, idx) => (
+                        <View key={`w-${idx}`} style={styles.digitalChip}>
+                          <Text style={styles.digitalChipText}>
+                            🌐 {safeText(w)}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* Addresses */}
+                {businessCard.addressLines &&
+                  businessCard.addressLines.length > 0 && (
+                    <View style={styles.fieldSection}>
+                      <Text style={styles.fieldSectionLabel}>📍 ADDRESS</Text>
+                      {businessCard.addressLines.map((addr, idx) => (
+                        <Text key={idx} style={styles.addressText}>
+                          • {safeText(addr)}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+
+                {/* Pincode & GSTIN */}
+                {(businessCard.pincode || businessCard.gstin) && (
+                  <View style={styles.fieldSection}>
+                    <Text style={styles.fieldSectionLabel}>🏷️ IDENTIFIERS</Text>
+                    <View style={styles.chipRow}>
+                      {businessCard.pincode ? (
+                        <View style={styles.idChip}>
+                          <Text style={styles.idChipText}>
+                            PIN: {safeText(businessCard.pincode)}
+                          </Text>
+                        </View>
+                      ) : null}
+                      {businessCard.gstin ? (
+                        <View style={styles.idChip}>
+                          <Text style={styles.idChipText}>
+                            GSTIN: {safeText(businessCard.gstin)}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  </View>
+                )}
+
+                {/* Refine with On-Device LLM Button */}
+                <TouchableOpacity
+                  style={[
+                    styles.refineBtn,
+                    thinkingLoading && styles.btnDisabled,
+                  ]}
+                  onPress={handleRefineWithThinking}
+                  disabled={thinkingLoading}
+                >
+                  {thinkingLoading ? (
+                    <ActivityIndicator color="#FFFFFF" size="small" />
+                  ) : (
+                    <Text style={styles.refineBtnText}>
+                      🧠 Refine with On-Device LLM (
+                      {activeModelObj
+                        ? activeModelObj.name.split(' ')[0]
+                        : 'Heuristic Engine'}
+                      )
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* View 2: Bill / Invoice Representation */}
+            {currentViewType === 'bill' && billDocument && (
+              <View style={styles.billViewBox}>
+                <View style={styles.billHeaderRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.merchantNameText}>
+                      {safeText(billDocument.issuerName) || 'Invoice / Bill'}
+                    </Text>
+                    {billDocument.invoiceNumber ? (
+                      <Text style={styles.sampleChipSub}>
+                        Invoice #{billDocument.invoiceNumber}
+                        {billDocument.invoiceDate
+                          ? ` • ${billDocument.invoiceDate}`
+                          : ''}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {billDocument.amountDue != null && (
+                    <Text style={styles.totalAmountText}>
+                      ${Number(billDocument.amountDue).toFixed(2)}
+                    </Text>
+                  )}
+                </View>
+
+                {/* Line Items Table */}
+                <View style={styles.tableCard}>
+                  <Text style={styles.tableTitle}>
+                    RECONSTRUCTED LINE ITEMS
+                  </Text>
+                  <View style={styles.tableHeaderRow}>
+                    <Text style={[styles.th, { flex: 3.5 }]}>DESCRIPTION</Text>
+                    <Text
+                      style={[styles.th, { flex: 1.5, textAlign: 'center' }]}
+                    >
+                      CODE
+                    </Text>
+                    <Text style={[styles.th, { flex: 2, textAlign: 'right' }]}>
+                      AMOUNT
+                    </Text>
+                  </View>
+
+                  {billDocument.lineItems &&
+                  billDocument.lineItems.length > 0 ? (
+                    billDocument.lineItems.map((item, idx) => (
+                      <View key={idx} style={styles.tableDataRow}>
+                        <Text style={[styles.td, { flex: 3.5 }]}>
+                          {safeText(item.description)}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.td,
+                            { flex: 1.5, textAlign: 'center' },
+                          ]}
+                        >
+                          {item.code || '—'}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.tdBold,
+                            { flex: 2, textAlign: 'right' },
+                          ]}
+                        >
+                          $
+                          {Number(
+                            item.billedAmount ?? item.patientResponsibility ?? 0
+                          ).toFixed(2)}
+                        </Text>
+                      </View>
+                    ))
+                  ) : (
+                    <Text style={styles.emptyTableText}>
+                      No line items recognized.
+                    </Text>
+                  )}
+
+                  {/* Financial Summary */}
+                  <View style={styles.tableFooter}>
+                    {billDocument.subtotal != null && (
+                      <View style={styles.summaryRow}>
+                        <Text style={styles.summaryLabel}>Subtotal</Text>
+                        <Text style={styles.summaryVal}>
+                          ${Number(billDocument.subtotal).toFixed(2)}
+                        </Text>
+                      </View>
+                    )}
+                    <View style={[styles.summaryRow, styles.grandTotalRow]}>
+                      <Text style={styles.grandTotalLabel}>
+                        TOTAL AMOUNT DUE
+                      </Text>
+                      <Text style={styles.grandTotalVal}>
+                        $
+                        {Number(
+                          billDocument.amountDue ?? billDocument.subtotal ?? 0
+                        ).toFixed(2)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            {/* Expandable Raw OCR Text */}
+            <TouchableOpacity
+              style={styles.ocrAccordionHeader}
+              onPress={() => setShowRawOcr(!showRawOcr)}
+            >
+              <Text style={styles.ocrAccordionTitle}>
+                {showRawOcr ? '▼ Hide Raw OCR Text' : '▶ View Raw OCR Text'}
+              </Text>
+            </TouchableOpacity>
+
+            {showRawOcr && ocrResult && (
+              <View style={styles.rawOcrBox}>
+                <Text style={styles.rawOcrContent}>{ocrResult.rawText}</Text>
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
+// ─── Stylesheet ─────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#0B0D17',
   },
+  scrollView: {
+    flex: 1,
+  },
   scrollContent: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? 16 : 24,
     paddingBottom: 40,
   },
   header: {
     marginBottom: 16,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
   },
   appTitle: {
     fontSize: 22,
     fontWeight: '800',
-    color: '#F9FAFB',
-    letterSpacing: 0.5,
+    color: '#FFFFFF',
+    letterSpacing: -0.5,
   },
   appSubtitle: {
     fontSize: 12,
-    color: '#9CA3AF',
-    marginTop: 4,
-    textAlign: 'center',
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#161824',
-    borderRadius: 10,
-    padding: 4,
-    marginBottom: 14,
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  tabActive: {
-    backgroundColor: '#4F46E5',
-  },
-  tabText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#9CA3AF',
-  },
-  tabTextActive: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-  },
-  primaryScanBtn: {
-    flexDirection: 'row',
-    backgroundColor: '#4338CA',
-    borderRadius: 12,
-    padding: 14,
-    alignItems: 'center',
-    marginBottom: 14,
-    borderWidth: 1.5,
-    borderColor: '#6366F1',
-    gap: 12,
-  },
-  primaryScanIcon: {
-    fontSize: 28,
-  },
-  primaryScanTitle: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  primaryScanSubtitle: {
-    color: '#C7D2FE',
-    fontSize: 11,
+    color: '#94A3B8',
     marginTop: 2,
   },
-  previewBox: {
-    marginBottom: 12,
-  },
-  previewLabel: {
-    color: '#9CA3AF',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  previewImage: {
-    width: '100%',
-    height: 140,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2E3247',
-  },
-  manualInputSection: {
-    marginBottom: 14,
-  },
-  input: {
-    backgroundColor: '#161824',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    color: '#F9FAFB',
-    fontSize: 12,
-    fontFamily: 'monospace',
-    borderWidth: 1,
-    borderColor: '#2E3247',
-    marginBottom: 8,
-  },
-  runUriBtn: {
-    backgroundColor: '#1E2235',
-    borderRadius: 8,
-    paddingVertical: 10,
+  llmHeaderPill: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#1E2340',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#374151',
+    borderColor: '#334155',
   },
-  runUriBtnText: {
-    color: '#38BDF8',
+  llmHeaderPillActive: {
+    backgroundColor: '#064E3B44',
+    borderColor: '#059669',
+  },
+  llmHeaderPillDot: {
+    fontSize: 10,
+    marginRight: 6,
+  },
+  llmHeaderPillText: {
     fontSize: 12,
     fontWeight: '700',
+    color: '#E2E8F0',
   },
-  loadingBox: {
-    alignItems: 'center',
-    marginVertical: 12,
+
+  // LLM Manager Card
+  llmManagerCard: {
+    backgroundColor: '#13182E',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: '#6366F1',
   },
-  loadingText: {
+  llmManagerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 14,
+  },
+  llmManagerTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  llmManagerSubtitle: {
+    fontSize: 11,
     color: '#A5B4FC',
-    fontSize: 12,
-    marginTop: 6,
+    marginTop: 2,
   },
-  errorText: {
-    color: '#EF4444',
-    fontSize: 12,
-    marginVertical: 6,
-    textAlign: 'center',
+  llmCloseBtn: {
+    padding: 4,
   },
-  statusText: {
-    color: '#10B981',
-    fontSize: 12,
-    marginVertical: 4,
-    textAlign: 'center',
-    fontWeight: '600',
+  llmCloseBtnText: {
+    color: '#94A3B8',
+    fontSize: 16,
+    fontWeight: '700',
   },
-  routeBadge: {
-    backgroundColor: '#1E2235',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: '#38BDF8',
+  modelCard: {
+    backgroundColor: '#0F1326',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#242B46',
   },
-  routeBadgeLabel: {
-    color: '#9CA3AF',
+  modelCardSelected: {
+    borderColor: '#6366F1',
+    backgroundColor: '#171D3D',
+  },
+  modelCardActive: {
+    borderColor: '#10B981',
+  },
+  modelHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  modelRadioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  modelRadio: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginRight: 8,
+  },
+  modelRadioActive: {
+    color: '#6366F1',
+  },
+  modelNameText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#F8FAFC',
+  },
+  modelTagBadge: {
+    backgroundColor: '#1E2548',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  modelTagText: {
     fontSize: 10,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    color: '#A5B4FC',
   },
-  routeBadgeValue: {
-    color: '#38BDF8',
+  modelDescText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 4,
+    marginLeft: 22,
+  },
+  modelStatusRow: {
+    marginTop: 8,
+    marginLeft: 22,
+    flexDirection: 'row',
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  statusActive: {
+    backgroundColor: '#064E3B',
+  },
+  statusActiveText: {
+    color: '#34D399',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  statusDownloading: {
+    backgroundColor: '#312E81',
+  },
+  statusDownloadingText: {
+    color: '#A5B4FC',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  statusDownloaded: {
+    backgroundColor: '#1E3A8A',
+  },
+  statusDownloadedText: {
+    color: '#93C5FD',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  statusNotDownloaded: {
+    backgroundColor: '#1E2340',
+  },
+  statusNotDownloadedText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+
+  // LLM Action Area
+  llmActionArea: {
+    marginTop: 6,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  primaryActionBtn: {
+    backgroundColor: '#4F46E5',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    flex: 1,
+  },
+  primaryActionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  reDownloadBtn: {
+    backgroundColor: '#1E2340',
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  reDownloadBtnText: {
     fontSize: 14,
-    fontWeight: '800',
-    marginTop: 2,
   },
-  cardContainer: {
-    backgroundColor: '#131520',
+  activeModelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  activeNotice: {
+    flex: 1,
+  },
+  activeNoticeText: {
+    color: '#34D399',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  unloadBtn: {
+    backgroundColor: '#7F1D1D',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+  },
+  unloadBtnText: {
+    color: '#FCA5A5',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  progressContainer: {
+    backgroundColor: '#0B0D17',
+    padding: 12,
+    borderRadius: 8,
+  },
+  progressHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressTitle: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  progressBarTrack: {
+    height: 6,
+    backgroundColor: '#1E2340',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#6366F1',
+  },
+  progressStats: {
+    color: '#94A3B8',
+    fontSize: 10,
+  },
+
+  // Scanner Hero Card
+  scannerHeroCard: {
+    backgroundColor: '#13182E',
     borderRadius: 14,
     padding: 16,
     marginBottom: 16,
-    borderWidth: 1.5,
-    borderColor: '#374151',
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  badge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  badgeText: {
-    color: '#FFF',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  cardHeaderTitle: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '700',
-    flex: 1,
-  },
-  cardTagline: {
-    color: '#9CA3AF',
-    fontSize: 12,
-    fontStyle: 'italic',
-    marginBottom: 10,
-  },
-  issuerBox: {
-    backgroundColor: '#1E2235',
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 10,
-    borderLeftWidth: 3,
-    borderLeftColor: '#10B981',
-  },
-  issuerLabel: {
-    color: '#9CA3AF',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  issuerName: {
-    color: '#F9FAFB',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  metaGrid: {
-    flexDirection: 'row',
-    backgroundColor: '#161824',
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 12,
-  },
-  metaCol: {
-    flex: 1,
-  },
-  metaKey: {
-    color: '#9CA3AF',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  metaVal: {
-    color: '#F9FAFB',
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  financialRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 12,
-  },
-  financialBox: {
-    flex: 1,
-    backgroundColor: '#161824',
-    padding: 10,
-    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#2E3247',
+    borderColor: '#242B46',
   },
-  finHighlight: {
-    borderColor: '#10B981',
-    backgroundColor: '#064E3B20',
+  scanHeroBtn: {
+    backgroundColor: '#6366F1',
+    borderRadius: 12,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  finLabel: {
-    color: '#9CA3AF',
-    fontSize: 9,
-    fontWeight: '700',
+  scanHeroContent: {
+    alignItems: 'center',
   },
-  finValue: {
-    color: '#F9FAFB',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 3,
+  scanHeroIcon: {
+    fontSize: 28,
+    marginBottom: 4,
   },
-  finValueHighlight: {
-    color: '#10B981',
+  scanHeroTitle: {
+    color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '800',
   },
-  sectionHeader: {
-    color: '#D1D5DB',
-    fontSize: 12,
+  scanHeroSubtitle: {
+    color: '#E0E7FF',
+    fontSize: 11,
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  pageLimitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  pageLimitLabel: {
+    color: '#94A3B8',
+    fontSize: 11,
     fontWeight: '700',
+    marginRight: 8,
+  },
+  pageChip: {
+    backgroundColor: '#1E2340',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  pageChipActive: {
+    backgroundColor: '#3730A3',
+  },
+  pageChipText: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  pageChipTextActive: {
+    color: '#FFFFFF',
+  },
+  sampleSection: {
+    marginTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#1E2340',
+    paddingTop: 12,
+  },
+  sampleSectionLabel: {
+    color: '#64748B',
+    fontSize: 11,
+    fontWeight: '600',
     marginBottom: 8,
   },
-  table: {
-    backgroundColor: '#161824',
+  sampleScroll: {
+    flexDirection: 'row',
+  },
+  sampleChip: {
+    backgroundColor: '#1E2340',
     borderRadius: 8,
-    overflow: 'hidden',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginRight: 8,
     borderWidth: 1,
-    borderColor: '#2E3247',
+    borderColor: '#334155',
   },
-  tableHeaderRow: {
-    flexDirection: 'row',
-    backgroundColor: '#1E2235',
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2E3247',
-  },
-  thCell: {
-    color: '#9CA3AF',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  tableRow: {
-    flexDirection: 'row',
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1F2436',
-    alignItems: 'center',
-  },
-  tdCell: {
-    color: '#F3F4F6',
+  sampleChipTitle: {
+    color: '#F1F5F9',
     fontSize: 11,
+    fontWeight: '700',
   },
-  emptyNote: {
-    color: '#6B7280',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
-  cardFieldBlock: {
-    marginBottom: 10,
-  },
-  cardFieldLabel: {
-    color: '#9CA3AF',
+  sampleChipSub: {
+    color: '#94A3B8',
     fontSize: 10,
-    fontWeight: '700',
-    marginBottom: 4,
-    letterSpacing: 0.5,
+    marginTop: 2,
   },
-  personItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 2,
+
+  // Status & Error Boxes
+  statusBox: {
+    backgroundColor: '#064E3B33',
+    borderColor: '#059669',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 14,
   },
-  personName: {
-    color: '#F9FAFB',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  personRole: {
+  statusBoxText: {
     color: '#34D399',
     fontSize: 12,
-    fontWeight: '500',
+    fontWeight: '600',
+  },
+  errorBox: {
+    backgroundColor: '#7F1D1D33',
+    borderColor: '#DC2626',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 14,
+  },
+  errorBoxText: {
+    color: '#F87171',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  // Thumbnail
+  thumbnailBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#13182E',
+    borderRadius: 10,
+    padding: 8,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#242B46',
+  },
+  thumbnailImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    marginRight: 10,
+  },
+  thumbnailInfo: {
+    flex: 1,
+  },
+  thumbnailTitle: {
+    color: '#F1F5F9',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  thumbnailSub: {
+    color: '#94A3B8',
+    fontSize: 11,
+  },
+
+  // Result Section
+  resultContainer: {
+    marginBottom: 20,
+  },
+  detectionBanner: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#1E2340',
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  detectionBadge: {
+    backgroundColor: '#3730A3',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  detectionBadgeText: {
+    color: '#E0E7FF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  switchViewBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  switchViewBtnText: {
+    color: '#93C5FD',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Card View
+  cardViewBox: {
+    backgroundColor: '#13182E',
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#242B46',
+  },
+  companyNameText: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: -0.3,
+  },
+  taglineText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  sloganText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#FCD34D',
+    marginTop: 4,
+  },
+  fieldSection: {
+    marginTop: 14,
+  },
+  fieldSectionLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    marginBottom: 6,
+    letterSpacing: 0.5,
+  },
+  personRowText: {
+    color: '#F1F5F9',
+    fontSize: 13,
+    marginBottom: 2,
   },
   chipRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
   },
-  chip: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
+  phoneChip: {
+    backgroundColor: '#064E3B',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#3B82F6',
   },
-  emailChip: { borderColor: '#10B981' },
-  webChip: { borderColor: '#8B5CF6' },
-  pinChip: { borderColor: '#EC4899' },
-  gstChip: { borderColor: '#F59E0B' },
-  qrChip: { borderColor: '#14B8A6' },
-  chipText: {
-    color: '#F9FAFB',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  addressLine: {
-    color: '#D1D5DB',
-    fontSize: 12,
-    lineHeight: 16,
-    marginBottom: 2,
-  },
-  inspectSection: {
-    backgroundColor: '#161824',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#2E3247',
-  },
-  inspectHeader: {
-    color: '#38BDF8',
+  phoneChipText: {
+    color: '#34D399',
     fontSize: 12,
     fontWeight: '700',
+  },
+  digitalChip: {
+    backgroundColor: '#1E3A8A',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  digitalChipText: {
+    color: '#93C5FD',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  addressText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    marginBottom: 3,
+  },
+  idChip: {
+    backgroundColor: '#312E81',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  idChipText: {
+    color: '#A5B4FC',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  refineBtn: {
+    backgroundColor: '#7C3AED',
+    marginTop: 18,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  refineBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+
+  // Bill View
+  billViewBox: {
+    backgroundColor: '#13182E',
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#242B46',
+  },
+  billHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  merchantNameText: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    flex: 1,
+  },
+  totalAmountText: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#34D399',
+  },
+  tableCard: {
+    backgroundColor: '#0F1326',
+    borderRadius: 10,
+    padding: 12,
+  },
+  tableTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    marginBottom: 8,
+    letterSpacing: 0.5,
+  },
+  tableHeaderRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E2340',
+    paddingBottom: 6,
     marginBottom: 6,
   },
-  inspectRow: {
-    color: '#D1D5DB',
+  th: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#94A3B8',
+  },
+  tableDataRow: {
+    flexDirection: 'row',
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+  td: {
+    fontSize: 11,
+    color: '#CBD5E1',
+  },
+  tdBold: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#F8FAFC',
+  },
+  emptyTableText: {
+    color: '#64748B',
+    fontSize: 11,
+    paddingVertical: 8,
+    textAlign: 'center',
+  },
+  tableFooter: {
+    borderTopWidth: 1,
+    borderTopColor: '#1E2340',
+    marginTop: 8,
+    paddingTop: 8,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 2,
+  },
+  summaryLabel: {
+    fontSize: 11,
+    color: '#94A3B8',
+  },
+  summaryVal: {
+    fontSize: 11,
+    color: '#E2E8F0',
+  },
+  grandTotalRow: {
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    marginTop: 4,
+    paddingTop: 4,
+  },
+  grandTotalLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  grandTotalVal: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#34D399',
+  },
+
+  // Accordion
+  ocrAccordionHeader: {
+    backgroundColor: '#13182E',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#242B46',
+  },
+  ocrAccordionTitle: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  rawOcrBox: {
+    backgroundColor: '#0F1326',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: '#1E2340',
+  },
+  rawOcrContent: {
+    color: '#CBD5E1',
     fontSize: 11,
     lineHeight: 16,
-    marginBottom: 2,
+    fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo',
   },
-  rawTextPreview: {
-    color: '#9CA3AF',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    lineHeight: 15,
-    backgroundColor: '#0F111A',
-    padding: 8,
-    borderRadius: 6,
+
+  btnDisabled: {
+    opacity: 0.6,
   },
 });

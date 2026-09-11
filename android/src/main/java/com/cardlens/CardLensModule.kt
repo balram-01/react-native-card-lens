@@ -6,9 +6,11 @@ import com.facebook.react.bridge.ActivityEventListener
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
@@ -18,6 +20,8 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizerOptionsInterface
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * TurboModule implementation for react-native-card-lens.
@@ -42,6 +46,9 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   init {
     reactContext.addActivityEventListener(this)
   }
+
+  // Dedicated background thread pool for all heavy image decodes, OCR processing, and spatial parsing
+  private val backgroundExecutor: ExecutorService = Executors.newFixedThreadPool(2)
 
   // State held during active scanner session
   private var pendingScanPromise: Promise? = null
@@ -79,7 +86,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
       val allowGallery = if (options.hasKey("allowGalleryImport")) options.getBoolean("allowGalleryImport") else true
       val scannerModeStr = if (options.hasKey("scannerMode")) options.getString("scannerMode") else "FULL"
       pendingScanAutoOcr = if (options.hasKey("autoOcr")) options.getBoolean("autoOcr") else true
-      pendingScanScript = if (options.hasKey("script")) options.getString("script") ?: "latin" else "latin"
+      pendingScanScript = if (options.hasKey("script")) options.getString("script") ?: "auto" else "auto"
 
       val mode = when (scannerModeStr?.uppercase()) {
         "BASE" -> GmsDocumentScannerOptions.SCANNER_MODE_BASE
@@ -212,33 +219,35 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     onSuccess: (WritableMap) -> Unit,
     onError: (String) -> Unit
   ) {
-    try {
-      val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
+    backgroundExecutor.execute {
+      try {
+        val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
 
-      val options: TextRecognizerOptionsInterface = when (script.lowercase()) {
-        "devanagari" -> DevanagariTextRecognizerOptions.Builder().build()
-        else          -> TextRecognizerOptions.DEFAULT_OPTIONS
-      }
+        val options: TextRecognizerOptionsInterface = when (script.lowercase()) {
+          "latin" -> TextRecognizerOptions.DEFAULT_OPTIONS
+          else    -> DevanagariTextRecognizerOptions.Builder().build()
+        }
 
-      val recognizer = TextRecognition.getClient(options)
+        val recognizer = TextRecognition.getClient(options)
 
-      recognizer.process(image)
-        .addOnSuccessListener { visionText ->
-          try {
-            val result = Arguments.createMap()
-            result.putString("rawText", visionText.text)
-            result.putArray("blocks", serializeBlocks(visionText.textBlocks))
-            onSuccess(result)
-          } catch (e: Exception) {
-            onError(e.message ?: "Failed to serialize OCR result")
+        recognizer.process(image)
+          .addOnSuccessListener(backgroundExecutor) { visionText ->
+            try {
+              val result = Arguments.createMap()
+              result.putString("rawText", visionText.text)
+              result.putArray("blocks", serializeBlocks(visionText.textBlocks))
+              onSuccess(result)
+            } catch (e: Exception) {
+              onError(e.message ?: "Failed to serialize OCR result")
+            }
           }
-        }
-        .addOnFailureListener { e ->
-          onError(e.message ?: "OCR processing failed")
-        }
+          .addOnFailureListener(backgroundExecutor) { e ->
+            onError(e.message ?: "OCR processing failed")
+          }
 
-    } catch (e: Exception) {
-      onError(e.message ?: "Failed to load image from URI")
+      } catch (e: Exception) {
+        onError(e.message ?: "Failed to load image from URI")
+      }
     }
   }
 
@@ -251,33 +260,35 @@ class CardLensModule(reactContext: ReactApplicationContext) :
    * from any text string.
    */
   override fun extractContactFields(text: String, promise: Promise) {
-    try {
-      val fields = FieldExtractor.extractContactFields(text)
-      val result = Arguments.createMap()
+    backgroundExecutor.execute {
+      try {
+        val fields = FieldExtractor.extractContactFields(text)
+        val result = Arguments.createMap()
 
-      val phonesArray = Arguments.createArray()
-      fields.phoneNumbers.forEach { phonesArray.pushString(it) }
-      result.putArray("phoneNumbers", phonesArray)
+        val phonesArray = Arguments.createArray()
+        fields.phoneNumbers.forEach { phonesArray.pushString(it) }
+        result.putArray("phoneNumbers", phonesArray)
 
-      val emailsArray = Arguments.createArray()
-      fields.emails.forEach { emailsArray.pushString(it) }
-      result.putArray("emails", emailsArray)
+        val emailsArray = Arguments.createArray()
+        fields.emails.forEach { emailsArray.pushString(it) }
+        result.putArray("emails", emailsArray)
 
-      val websitesArray = Arguments.createArray()
-      fields.websites.forEach { websitesArray.pushString(it) }
-      result.putArray("websites", websitesArray)
+        val websitesArray = Arguments.createArray()
+        fields.websites.forEach { websitesArray.pushString(it) }
+        result.putArray("websites", websitesArray)
 
-      val gstinArray = Arguments.createArray()
-      fields.gstin.forEach { gstinArray.pushString(it) }
-      result.putArray("gstin", gstinArray)
+        val gstinArray = Arguments.createArray()
+        fields.gstin.forEach { gstinArray.pushString(it) }
+        result.putArray("gstin", gstinArray)
 
-      val pincodesArray = Arguments.createArray()
-      fields.pincodes.forEach { pincodesArray.pushString(it) }
-      result.putArray("pincodes", pincodesArray)
+        val pincodesArray = Arguments.createArray()
+        fields.pincodes.forEach { pincodesArray.pushString(it) }
+        result.putArray("pincodes", pincodesArray)
 
-      promise.resolve(result)
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_EXTRACT_ERROR", e.message, e)
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_EXTRACT_ERROR", e.message, e)
+      }
     }
   }
 
@@ -290,65 +301,67 @@ class CardLensModule(reactContext: ReactApplicationContext) :
    * using TextBlock and TextLine bounding box geometry.
    */
   override fun extractCardLayout(rawOcrResult: ReadableMap, promise: Promise) {
-    try {
-      val rawBlocks = mutableListOf<RawBlock>()
-      val blocksArray = if (rawOcrResult.hasKey("blocks")) rawOcrResult.getArray("blocks") else null
+    backgroundExecutor.execute {
+      try {
+        val rawBlocks = mutableListOf<RawBlock>()
+        val blocksArray = if (rawOcrResult.hasKey("blocks")) rawOcrResult.getArray("blocks") else null
 
-      if (blocksArray != null) {
-        for (i in 0 until blocksArray.size()) {
-          val blockMap = blocksArray.getMap(i) ?: continue
-          val blockText = if (blockMap.hasKey("text")) blockMap.getString("text") ?: "" else ""
-          val blockBox = deserializeBoundingBox(blockMap.getMap("boundingBox"))
+        if (blocksArray != null) {
+          for (i in 0 until blocksArray.size()) {
+            val blockMap = blocksArray.getMap(i) ?: continue
+            val blockText = if (blockMap.hasKey("text")) blockMap.getString("text") ?: "" else ""
+            val blockBox = deserializeBoundingBox(blockMap.getMap("boundingBox"))
 
-          val linesList = mutableListOf<RawLine>()
-          val linesArray = if (blockMap.hasKey("lines")) blockMap.getArray("lines") else null
-          if (linesArray != null) {
-            for (j in 0 until linesArray.size()) {
-              val lineMap = linesArray.getMap(j) ?: continue
-              val lineText = if (lineMap.hasKey("text")) lineMap.getString("text") ?: "" else ""
-              val lineBox = deserializeBoundingBox(lineMap.getMap("boundingBox"))
-              linesList.add(RawLine(lineText, lineBox))
+            val linesList = mutableListOf<RawLine>()
+            val linesArray = if (blockMap.hasKey("lines")) blockMap.getArray("lines") else null
+            if (linesArray != null) {
+              for (j in 0 until linesArray.size()) {
+                val lineMap = linesArray.getMap(j) ?: continue
+                val lineText = if (lineMap.hasKey("text")) lineMap.getString("text") ?: "" else ""
+                val lineBox = deserializeBoundingBox(lineMap.getMap("boundingBox"))
+                linesList.add(RawLine(lineText, lineBox))
+              }
             }
+            rawBlocks.add(RawBlock(blockText, blockBox, linesList))
           }
-          rawBlocks.add(RawBlock(blockText, blockBox, linesList))
         }
-      }
 
-      val layout = CardLayoutParser.parseLayout(rawBlocks)
-      val result = Arguments.createMap()
+        val layout = CardLayoutParser.parseLayout(rawBlocks)
+        val result = Arguments.createMap()
 
-      if (layout.companyName != null) {
-        result.putString("companyName", layout.companyName)
-      } else {
-        result.putNull("companyName")
-      }
-
-      if (layout.tagline != null) {
-        result.putString("tagline", layout.tagline)
-      } else {
-        result.putNull("tagline")
-      }
-
-      val personsArray = Arguments.createArray()
-      layout.contactPersons.forEach { person ->
-        val personMap = Arguments.createMap()
-        personMap.putString("name", person.name)
-        if (person.role != null) {
-          personMap.putString("role", person.role)
+        if (layout.companyName != null) {
+          result.putString("companyName", layout.companyName)
         } else {
-          personMap.putNull("role")
+          result.putNull("companyName")
         }
-        personsArray.pushMap(personMap)
+
+        if (layout.tagline != null) {
+          result.putString("tagline", layout.tagline)
+        } else {
+          result.putNull("tagline")
+        }
+
+        val personsArray = Arguments.createArray()
+        layout.contactPersons.forEach { person ->
+          val personMap = Arguments.createMap()
+          personMap.putString("name", person.name)
+          if (person.role != null) {
+            personMap.putString("role", person.role)
+          } else {
+            personMap.putNull("role")
+          }
+          personsArray.pushMap(personMap)
+        }
+        result.putArray("contactPersons", personsArray)
+
+        val addressArray = Arguments.createArray()
+        layout.addressLines.forEach { addressArray.pushString(it) }
+        result.putArray("addressLines", addressArray)
+
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_LAYOUT_ERROR", e.message, e)
       }
-      result.putArray("contactPersons", personsArray)
-
-      val addressArray = Arguments.createArray()
-      layout.addressLines.forEach { addressArray.pushString(it) }
-      result.putArray("addressLines", addressArray)
-
-      promise.resolve(result)
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_LAYOUT_ERROR", e.message, e)
     }
   }
 
@@ -367,29 +380,133 @@ class CardLensModule(reactContext: ReactApplicationContext) :
 
 
   override fun scanBarcodes(imageUri: String, promise: Promise) {
-    try {
-      val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
-      val scanner = BarcodeScanning.getClient()
+    backgroundExecutor.execute {
+      try {
+        val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
+        val scanner = BarcodeScanning.getClient()
 
-      scanner.process(image)
-        .addOnSuccessListener { barcodes ->
-          try {
-            val result = Arguments.createArray()
-            for (barcode in barcodes) {
-              result.pushMap(serializeBarcode(barcode))
+        scanner.process(image)
+          .addOnSuccessListener(backgroundExecutor) { barcodes ->
+            try {
+              val result = Arguments.createArray()
+              for (barcode in barcodes) {
+                result.pushMap(serializeBarcode(barcode))
+              }
+              promise.resolve(result)
+            } catch (e: Exception) {
+              promise.reject("CARDLENS_SERIALIZE_ERROR", e.message, e)
             }
-            promise.resolve(result)
-          } catch (e: Exception) {
-            promise.reject("CARDLENS_SERIALIZE_ERROR", e.message, e)
           }
-        }
-        .addOnFailureListener { e ->
-          promise.reject("CARDLENS_BARCODE_ERROR", e.message, e)
-        }
+          .addOnFailureListener(backgroundExecutor) { e ->
+            promise.reject("CARDLENS_BARCODE_ERROR", e.message, e)
+          }
 
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_INPUT_ERROR", e.message, e)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_INPUT_ERROR", e.message, e)
+      }
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Multi-page & Single-page OCR Extractors
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private data class PageOcrData(
+    val rawText: String,
+    val blocks: List<RawBlock>,
+    val qrCodeData: String?
+  )
+
+  private fun scanBarcodeSafely(imageUri: String, onResult: (String?) -> Unit) {
+    backgroundExecutor.execute {
+      try {
+        val barcodeImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
+        val barcodeScanner = BarcodeScanning.getClient()
+        barcodeScanner.process(barcodeImage)
+          .addOnSuccessListener(backgroundExecutor) { barcodes ->
+            val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
+            onResult(qrBarcode?.rawValue)
+          }
+          .addOnFailureListener(backgroundExecutor) {
+            onResult(null)
+          }
+      } catch (e: Exception) {
+        onResult(null)
+      }
+    }
+  }
+
+  private fun extractPageOcrData(
+    imageUri: String,
+    onSuccess: (PageOcrData) -> Unit,
+    onError: (Exception) -> Unit
+  ) {
+    backgroundExecutor.execute {
+      try {
+        val devImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
+        val latinImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
+        val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+        val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+        devanagariRecognizer.process(devImage)
+          .addOnSuccessListener(backgroundExecutor) { devVisionText ->
+            val devText = devVisionText.text
+            val devBlocks = toRawBlocks(devVisionText)
+
+            latinRecognizer.process(latinImage)
+              .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
+                val latinText = latinVisionText.text
+                val latinBlocks = toRawBlocks(latinVisionText)
+                val fusedBlocks = CardScannerEngine.fuseOcrBlocks(latinBlocks, devBlocks)
+                val fusedText = CardScannerEngine.fuseRawText(latinText, devText)
+                scanBarcodeSafely(imageUri) { qrCode ->
+                  onSuccess(PageOcrData(fusedText, fusedBlocks, qrCode))
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) {
+                scanBarcodeSafely(imageUri) { qrCode ->
+                  onSuccess(PageOcrData(devText, devBlocks, qrCode))
+                }
+              }
+          }
+          .addOnFailureListener(backgroundExecutor) {
+            latinRecognizer.process(latinImage)
+              .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
+                scanBarcodeSafely(imageUri) { qrCode ->
+                  onSuccess(PageOcrData(latinVisionText.text, toRawBlocks(latinVisionText), qrCode))
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) { e -> onError(e) }
+          }
+      } catch (e: Exception) {
+        onError(e)
+      }
+    }
+  }
+
+  private fun extractMultiplePagesOcrData(
+    uris: List<String>,
+    index: Int = 0,
+    accumulated: MutableList<PageOcrData> = mutableListOf(),
+    onComplete: (List<PageOcrData>) -> Unit,
+    onError: (Exception) -> Unit
+  ) {
+    if (index >= uris.size) {
+      onComplete(accumulated)
+      return
+    }
+    extractPageOcrData(uris[index], { pageData ->
+      accumulated.add(pageData)
+      extractMultiplePagesOcrData(uris, index + 1, accumulated, onComplete, onError)
+    }, onError)
+  }
+
+  private fun toUriList(array: ReadableArray): List<String> {
+    val list = mutableListOf<String>()
+    for (i in 0 until array.size()) {
+      array.getString(i)?.let { list.add(it) }
+    }
+    return list
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -397,53 +514,48 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   // ─────────────────────────────────────────────────────────────────────────────
 
   override fun scanCard(imageUri: String, promise: Promise) {
-    try {
-      val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
-      val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-      val barcodeScanner = BarcodeScanning.getClient()
+    extractPageOcrData(imageUri, { pageData ->
+      processAndResolveCardFused(pageData.rawText, pageData.blocks, pageData.qrCodeData, promise)
+    }, { e ->
+      promise.reject("CARDLENS_OCR_ERROR", e.message, e)
+    })
+  }
 
-      var qrCodeData: String? = null
-      val barcodeTask = barcodeScanner.process(image)
-        .addOnSuccessListener { barcodes ->
-          val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
-          qrCodeData = qrBarcode?.rawValue
-        }
-
-      latinRecognizer.process(image)
-        .addOnSuccessListener { latinVisionText ->
-          val latinText = latinVisionText.text
-
-          if (ScriptDetector.shouldRerunWithDevanagari(latinText)) {
-            val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-            devanagariRecognizer.process(image)
-              .addOnSuccessListener { devanagariVisionText ->
-                val chosenVisionText = if (ScriptDetector.isDevanagariResultBetter(latinText, devanagariVisionText.text)) {
-                  devanagariVisionText
-                } else {
-                  latinVisionText
-                }
-                barcodeTask.addOnCompleteListener {
-                  processAndResolveCard(chosenVisionText, qrCodeData, promise)
-                }
-              }
-              .addOnFailureListener {
-                barcodeTask.addOnCompleteListener {
-                  processAndResolveCard(latinVisionText, qrCodeData, promise)
-                }
-              }
-          } else {
-            barcodeTask.addOnCompleteListener {
-              processAndResolveCard(latinVisionText, qrCodeData, promise)
-            }
-          }
-        }
-        .addOnFailureListener { e ->
-          promise.reject("CARDLENS_OCR_ERROR", e.message, e)
-        }
-
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_INPUT_ERROR", e.message, e)
+  override fun scanCardPages(imageUris: ReadableArray, promise: Promise) {
+    val uris = toUriList(imageUris)
+    if (uris.isEmpty()) {
+      promise.reject("CARDLENS_INPUT_ERROR", "imageUris must not be empty")
+      return
     }
+    extractMultiplePagesOcrData(uris, 0, mutableListOf(), { pagesData ->
+      backgroundExecutor.execute {
+        try {
+          val cards = pagesData.map { pageData ->
+            CardScannerEngine.assembleBusinessCard(pageData.rawText, pageData.blocks, pageData.qrCodeData)
+          }
+          val mergedCard = BusinessCard(
+            companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
+            tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
+            slogan = cards.firstOrNull { !it.slogan.isNullOrBlank() }?.slogan,
+            contactPersons = cards.flatMap { it.contactPersons }.distinctBy { it.name.trim().lowercase() },
+            phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
+            labeledPhones = cards.flatMap { it.labeledPhones }.distinctBy { it.number },
+            emails = cards.flatMap { it.emails }.distinct(),
+            websites = cards.flatMap { it.websites }.distinct(),
+            addressLines = cards.flatMap { it.addressLines }.distinct(),
+            pincode = cards.firstOrNull { !it.pincode.isNullOrBlank() }?.pincode,
+            gstin = cards.firstOrNull { !it.gstin.isNullOrBlank() }?.gstin,
+            qrCodeData = cards.firstOrNull { !it.qrCodeData.isNullOrBlank() }?.qrCodeData,
+            rawText = cards.mapIndexed { idx, c -> "--- Page ${idx + 1} ---\n${c.rawText}" }.joinToString("\n\n")
+          )
+          promise.resolve(mergedCard.toWritableMap())
+        } catch (e: Exception) {
+          promise.reject("CARDLENS_CARD_PAGES_ERROR", e.message, e)
+        }
+      }
+    }, { e ->
+      promise.reject("CARDLENS_CARD_PAGES_ERROR", e.message, e)
+    })
   }
 
   private fun toRawBlocks(visionText: com.google.mlkit.vision.text.Text): List<RawBlock> {
@@ -459,21 +571,23 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  private fun processAndResolveCard(
-    visionText: com.google.mlkit.vision.text.Text,
+  private fun processAndResolveCardFused(
+    fusedText: String,
+    fusedBlocks: List<RawBlock>,
     qrCodeData: String?,
     promise: Promise
   ) {
-    try {
-      val rawBlocks = toRawBlocks(visionText)
-      val businessCard = CardScannerEngine.assembleBusinessCard(
-        rawText = visionText.text,
-        blocks = rawBlocks,
-        qrCodeData = qrCodeData
-      )
-      promise.resolve(businessCard.toWritableMap())
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_ASSEMBLE_ERROR", e.message, e)
+    backgroundExecutor.execute {
+      try {
+        val businessCard = CardScannerEngine.assembleBusinessCard(
+          rawText = fusedText,
+          blocks = fusedBlocks,
+          qrCodeData = qrCodeData
+        )
+        promise.resolve(businessCard.toWritableMap())
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_ASSEMBLE_ERROR", e.message, e)
+      }
     }
   }
 
@@ -482,55 +596,51 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   // ─────────────────────────────────────────────────────────────────────────────
 
   override fun scanBill(imageUri: String, promise: Promise) {
-    try {
-      val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
-      val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-      latinRecognizer.process(image)
-        .addOnSuccessListener { latinVisionText ->
-          val latinText = latinVisionText.text
-
-          if (ScriptDetector.shouldRerunWithDevanagari(latinText)) {
-            val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-            devanagariRecognizer.process(image)
-              .addOnSuccessListener { devanagariVisionText ->
-                val chosen = if (ScriptDetector.isDevanagariResultBetter(latinText, devanagariVisionText.text)) {
-                  devanagariVisionText
-                } else {
-                  latinVisionText
-                }
-                processAndResolveBill(chosen, promise)
-              }
-              .addOnFailureListener {
-                processAndResolveBill(latinVisionText, promise)
-              }
-          } else {
-            processAndResolveBill(latinVisionText, promise)
-          }
+    extractPageOcrData(imageUri, { pageData ->
+      backgroundExecutor.execute {
+        try {
+          val bill = BillScannerEngine.parseBill(pageData.rawText, pageData.blocks)
+          promise.resolve(bill.toWritableMap())
+        } catch (e: Exception) {
+          promise.reject("CARDLENS_BILL_ERROR", e.message, e)
         }
-        .addOnFailureListener { e ->
-          promise.reject("CARDLENS_OCR_ERROR", e.message, e)
-        }
-
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_INPUT_ERROR", e.message, e)
-    }
+      }
+    }, { e ->
+      promise.reject("CARDLENS_BILL_ERROR", e.message, e)
+    })
   }
 
-  private fun processAndResolveBill(
-    visionText: com.google.mlkit.vision.text.Text,
-    promise: Promise
-  ) {
-    try {
-      val rawBlocks = toRawBlocks(visionText)
-      val billDocument = BillScannerEngine.parseBill(
-        rawText = visionText.text,
-        blocks = rawBlocks
-      )
-      promise.resolve(billDocument.toWritableMap())
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_BILL_ERROR", e.message, e)
+  override fun scanBillPages(imageUris: ReadableArray, promise: Promise) {
+    val uris = toUriList(imageUris)
+    if (uris.isEmpty()) {
+      promise.reject("CARDLENS_INPUT_ERROR", "imageUris must not be empty")
+      return
     }
+    extractMultiplePagesOcrData(uris, 0, mutableListOf(), { pagesData ->
+      backgroundExecutor.execute {
+        try {
+          val bills = pagesData.map { pageData ->
+            BillScannerEngine.parseBill(pageData.rawText, pageData.blocks)
+          }
+          val mergedBill = BillDocument(
+            documentType = bills.firstOrNull { !it.documentType.isNullOrBlank() }?.documentType,
+            issuerName = bills.firstOrNull { !it.issuerName.isNullOrBlank() }?.issuerName,
+            invoiceNumber = bills.firstOrNull { !it.invoiceNumber.isNullOrBlank() }?.invoiceNumber,
+            invoiceDate = bills.firstOrNull { !it.invoiceDate.isNullOrBlank() }?.invoiceDate,
+            dueDate = bills.firstOrNull { !it.dueDate.isNullOrBlank() }?.dueDate,
+            lineItems = bills.flatMap { it.lineItems },
+            subtotal = bills.lastOrNull { it.subtotal != null }?.subtotal ?: bills.firstOrNull { it.subtotal != null }?.subtotal,
+            amountDue = bills.lastOrNull { it.amountDue != null }?.amountDue ?: bills.firstOrNull { it.amountDue != null }?.amountDue,
+            rawText = bills.mapIndexed { idx, b -> "--- Page ${idx + 1} ---\n${b.rawText}" }.joinToString("\n\n")
+          )
+          promise.resolve(mergedBill.toWritableMap())
+        } catch (e: Exception) {
+          promise.reject("CARDLENS_BILL_PAGES_ERROR", e.message, e)
+        }
+      }
+    }, { e ->
+      promise.reject("CARDLENS_BILL_PAGES_ERROR", e.message, e)
+    })
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -538,77 +648,97 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   // ─────────────────────────────────────────────────────────────────────────────
 
   override fun scanDocument(imageUri: String, promise: Promise) {
-    try {
-      val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
-      val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-      val barcodeScanner = BarcodeScanning.getClient()
-
-      var qrCodeData: String? = null
-      val barcodeTask = barcodeScanner.process(image)
-        .addOnSuccessListener { barcodes ->
-          val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
-          qrCodeData = qrBarcode?.rawValue
-        }
-
-      latinRecognizer.process(image)
-        .addOnSuccessListener { latinVisionText ->
-          val latinText = latinVisionText.text
-
-          if (ScriptDetector.shouldRerunWithDevanagari(latinText)) {
-            val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-            devanagariRecognizer.process(image)
-              .addOnSuccessListener { devanagariVisionText ->
-                val chosen = if (ScriptDetector.isDevanagariResultBetter(latinText, devanagariVisionText.text)) {
-                  devanagariVisionText
-                } else {
-                  latinVisionText
-                }
-                barcodeTask.addOnCompleteListener {
-                  routeAndResolveDocument(chosen, qrCodeData, promise)
-                }
-              }
-              .addOnFailureListener {
-                barcodeTask.addOnCompleteListener {
-                  routeAndResolveDocument(latinVisionText, qrCodeData, promise)
-                }
-              }
-          } else {
-            barcodeTask.addOnCompleteListener {
-              routeAndResolveDocument(latinVisionText, qrCodeData, promise)
-            }
-          }
-        }
-        .addOnFailureListener { e ->
-          promise.reject("CARDLENS_OCR_ERROR", e.message, e)
-        }
-
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_INPUT_ERROR", e.message, e)
-    }
+    extractPageOcrData(imageUri, { pageData ->
+      routeAndResolveDocumentFused(pageData.rawText, pageData.blocks, pageData.qrCodeData, promise)
+    }, { e ->
+      promise.reject("CARDLENS_ROUTE_ERROR", e.message, e)
+    })
   }
 
-  private fun routeAndResolveDocument(
-    visionText: com.google.mlkit.vision.text.Text,
+  override fun scanDocumentPages(imageUris: ReadableArray, promise: Promise) {
+    val uris = toUriList(imageUris)
+    if (uris.isEmpty()) {
+      promise.reject("CARDLENS_INPUT_ERROR", "imageUris must not be empty")
+      return
+    }
+    extractMultiplePagesOcrData(uris, 0, mutableListOf(), { pagesData ->
+      backgroundExecutor.execute {
+        try {
+          val combinedText = pagesData.joinToString("\n") { it.rawText }
+          val docType = DocumentClassifier.classifyDocument(combinedText)
+          val result = Arguments.createMap()
+          result.putString("type", docType)
+
+          if (docType == "bill") {
+            val bills = pagesData.map { pageData ->
+              BillScannerEngine.parseBill(pageData.rawText, pageData.blocks)
+            }
+            val mergedBill = BillDocument(
+              documentType = bills.firstOrNull { !it.documentType.isNullOrBlank() }?.documentType,
+              issuerName = bills.firstOrNull { !it.issuerName.isNullOrBlank() }?.issuerName,
+              invoiceNumber = bills.firstOrNull { !it.invoiceNumber.isNullOrBlank() }?.invoiceNumber,
+              invoiceDate = bills.firstOrNull { !it.invoiceDate.isNullOrBlank() }?.invoiceDate,
+              dueDate = bills.firstOrNull { !it.dueDate.isNullOrBlank() }?.dueDate,
+              lineItems = bills.flatMap { it.lineItems },
+              subtotal = bills.lastOrNull { it.subtotal != null }?.subtotal ?: bills.firstOrNull { it.subtotal != null }?.subtotal,
+              amountDue = bills.lastOrNull { it.amountDue != null }?.amountDue ?: bills.firstOrNull { it.amountDue != null }?.amountDue,
+              rawText = bills.mapIndexed { idx, b -> "--- Page ${idx + 1} ---\n${b.rawText}" }.joinToString("\n\n")
+            )
+            result.putMap("data", mergedBill.toWritableMap())
+          } else {
+            val cards = pagesData.map { pageData ->
+              CardScannerEngine.assembleBusinessCard(pageData.rawText, pageData.blocks, pageData.qrCodeData)
+            }
+            val mergedCard = BusinessCard(
+              companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
+              tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
+              contactPersons = cards.flatMap { it.contactPersons }.distinctBy { it.name.trim().lowercase() },
+              phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
+              emails = cards.flatMap { it.emails }.distinct(),
+              websites = cards.flatMap { it.websites }.distinct(),
+              addressLines = cards.flatMap { it.addressLines }.distinct(),
+              pincode = cards.firstOrNull { !it.pincode.isNullOrBlank() }?.pincode,
+              gstin = cards.firstOrNull { !it.gstin.isNullOrBlank() }?.gstin,
+              qrCodeData = cards.firstOrNull { !it.qrCodeData.isNullOrBlank() }?.qrCodeData,
+              rawText = cards.mapIndexed { idx, c -> "--- Page ${idx + 1} ---\n${c.rawText}" }.joinToString("\n\n")
+            )
+            result.putMap("data", mergedCard.toWritableMap())
+          }
+
+          promise.resolve(result)
+        } catch (e: Exception) {
+          promise.reject("CARDLENS_DOCUMENT_PAGES_ERROR", e.message, e)
+        }
+      }
+    }, { e ->
+      promise.reject("CARDLENS_DOCUMENT_PAGES_ERROR", e.message, e)
+    })
+  }
+
+  private fun routeAndResolveDocumentFused(
+    text: String,
+    blocks: List<RawBlock>,
     qrCodeData: String?,
     promise: Promise
   ) {
-    try {
-      val rawBlocks = toRawBlocks(visionText)
-      val docType = DocumentClassifier.classifyDocument(visionText.text)
-      val result = Arguments.createMap()
-      result.putString("type", docType)
+    backgroundExecutor.execute {
+      try {
+        val docType = DocumentClassifier.classifyDocument(text)
+        val result = Arguments.createMap()
+        result.putString("type", docType)
 
-      if (docType == "bill") {
-        val bill = BillScannerEngine.parseBill(visionText.text, rawBlocks)
-        result.putMap("data", bill.toWritableMap())
-      } else {
-        val card = CardScannerEngine.assembleBusinessCard(visionText.text, rawBlocks, qrCodeData)
-        result.putMap("data", card.toWritableMap())
+        if (docType == "bill") {
+          val bill = BillScannerEngine.parseBill(text, blocks)
+          result.putMap("data", bill.toWritableMap())
+        } else {
+          val card = CardScannerEngine.assembleBusinessCard(text, blocks, qrCodeData)
+          result.putMap("data", card.toWritableMap())
+        }
+
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_ROUTE_ERROR", e.message, e)
       }
-
-      promise.resolve(result)
-    } catch (e: Exception) {
-      promise.reject("CARDLENS_ROUTE_ERROR", e.message, e)
     }
   }
 
@@ -696,5 +826,64 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     Barcode.FORMAT_CODABAR     -> "CODABAR"
     Barcode.FORMAT_ITF         -> "ITF"
     else                       -> "UNKNOWN"
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // On-Device Thinking Module — Download Bridge
+  // Inference (GGUF/llama.cpp) runs in JS via llama.rn.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  override fun loadThinkingModel(modelPath: String, promise: Promise) {
+    // No-op: model loading is handled by llama.rn in JS
+    promise.resolve(true)
+  }
+
+  override fun isThinkingModelReady(promise: Promise) {
+    // No-op: state is managed by llama.rn context in JS
+    promise.resolve(false)
+  }
+
+  override fun refineCardWithThinkingModule(rawText: String, promise: Promise) {
+    // Semantic Thinking Reasoner — instant, zero-dependency, pure Kotlin
+    backgroundExecutor.execute {
+      try {
+        val refined = ThinkingModuleEngine.refineWithSemanticReasoning(rawText)
+        promise.resolve(refined.toWritableMap())
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_THINKING_INFERENCE_ERROR", e.message, e)
+      }
+    }
+  }
+
+  override fun unloadThinkingModel(promise: Promise) {
+    // No-op: unloading is handled by llama.rn in JS
+    promise.resolve(null)
+  }
+
+  override fun downloadThinkingModel(url: String, fileName: String, authToken: String?, promise: Promise) {
+    backgroundExecutor.execute {
+      try {
+        val path = ThinkingModuleEngine.downloadModel(
+          reactApplicationContext,
+          url,
+          fileName,
+          authToken?.takeIf { it.isNotBlank() }
+        ) { downloaded, total ->
+          try {
+            val params = Arguments.createMap()
+            params.putString("fileName", fileName)
+            params.putDouble("downloadedBytes", downloaded.toDouble())
+            params.putDouble("totalBytes", total.toDouble())
+            params.putDouble("percentage", if (total > 0) (downloaded.toDouble() / total.toDouble()) * 100.0 else 0.0)
+            reactApplicationContext
+              .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+              .emit("onThinkingModelDownloadProgress", params)
+          } catch (_: Exception) {}
+        }
+        promise.resolve(path)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_THINKING_DOWNLOAD_ERROR", e.message, e)
+      }
+    }
   }
 }

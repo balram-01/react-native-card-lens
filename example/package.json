@@ -12,6 +12,7 @@
     "build:web": "vite build"
   },
   "dependencies": {
+    "llama.rn": "^0.13.0-rc.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.2",

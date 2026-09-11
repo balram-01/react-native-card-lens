@@ -32,6 +32,7 @@ export type {
   DocumentScannerOptions,
   ScanResult,
   ContactFields,
+  LabeledPhone,
   ContactPerson,
   CardLayoutFields,
   BusinessCard,
@@ -40,6 +41,13 @@ export type {
   DocumentType,
   DocumentScanResult,
 } from './types';
+
+export {
+  isThinkingModelReady,
+  refineCardWithThinkingModule,
+  downloadThinkingModel,
+} from './ThinkingModule';
+export type { ThinkingModelDownloadProgress } from './ThinkingModule';
 
 // ─── typed bridge wrappers ────────────────────────────────────────────────────
 
@@ -59,7 +67,7 @@ export type {
  */
 export async function recognizeText(
   imageUri: string,
-  script: OcrScript = 'latin'
+  script: OcrScript = 'auto'
 ): Promise<RawOcrResult> {
   const raw = await NativeCardLens.recognizeText(imageUri, script);
   // The native layer already serialises into the correct shape; we just cast.
@@ -112,7 +120,7 @@ export async function startScanner(
     scannerMode: options.scannerMode ?? 'FULL',
     allowGalleryImport: options.allowGalleryImport ?? true,
     autoOcr: options.autoOcr ?? true,
-    script: options.script ?? 'latin',
+    script: options.script ?? 'auto',
   };
   const raw = await NativeCardLens.startScanner(config);
   return raw as unknown as ScanResult;
@@ -168,6 +176,7 @@ export async function extractCardLayout(
 
 /**
  * End-to-end on-device business card scanner.
+ * Supports both single card images and multi-page cards (e.g. front & back).
  *
  * Automatically performs:
  *  1. Dual-recognizer OCR with smart script detection (Latin vs Devanagari routing)
@@ -178,25 +187,45 @@ export async function extractCardLayout(
  *
  * 100% on-device, zero network calls, zero API keys.
  *
- * @param imageUri  `file://` or `content://` URI of the business card image.
+ * @param imageUri  `file://` or `content://` URI of the business card image, or an array of URIs (e.g. [front, back]).
  * @returns         Unified `BusinessCard` object.
  *
  * @example
  * ```ts
  * const card = await scanCard('file:///data/user/0/.../card.jpg');
- * console.log('Company:', card.companyName);
- * console.log('Phones:', card.phoneNumbers);
- * console.log('Email:', card.email);
- * console.log('Persons:', card.contactPersons);
+ * const multiCard = await scanCard(['file:///card_front.jpg', 'file:///card_back.jpg']);
  * ```
  */
-export async function scanCard(imageUri: string): Promise<BusinessCard> {
+export async function scanCard(
+  imageUri: string | string[]
+): Promise<BusinessCard> {
+  if (Array.isArray(imageUri)) {
+    return scanCardPages(imageUri);
+  }
   const raw = await NativeCardLens.scanCard(imageUri);
   return raw as unknown as BusinessCard;
 }
 
 /**
+ * Multi-page business card scanner (e.g. front & back).
+ */
+export async function scanCardPages(
+  imageUris: string[]
+): Promise<BusinessCard> {
+  if (!imageUris || imageUris.length === 0) {
+    throw new Error('scanCardPages requires at least one image URI');
+  }
+  if (imageUris.length === 1) {
+    const single = await NativeCardLens.scanCard(imageUris[0]!);
+    return single as unknown as BusinessCard;
+  }
+  const raw = await NativeCardLens.scanCardPages(imageUris);
+  return raw as unknown as BusinessCard;
+}
+
+/**
  * End-to-end bill & invoice tabular data extractor.
+ * Supports both single page bills and multi-page continuous invoices.
  *
  * Automatically performs:
  *  1. On-device OCR
@@ -207,25 +236,45 @@ export async function scanCard(imageUri: string): Promise<BusinessCard> {
  *
  * 100% on-device, zero network calls, zero API keys.
  *
- * @param imageUri  `file://` or `content://` URI of the bill or invoice image.
+ * @param imageUri  `file://` or `content://` URI of the bill or invoice image, or array of page URIs.
  * @returns         Structured `BillDocument` object.
  *
  * @example
  * ```ts
  * const bill = await scanBill('file:///data/user/0/.../invoice.jpg');
- * console.log('Issuer:', bill.issuerName);
- * console.log('Invoice #:', bill.invoiceNumber);
- * console.log('Total Due:', bill.amountDue);
- * console.log('Items:', bill.lineItems);
+ * const multiBill = await scanBill(['file:///invoice_p1.jpg', 'file:///invoice_p2.jpg']);
  * ```
  */
-export async function scanBill(imageUri: string): Promise<BillDocument> {
+export async function scanBill(
+  imageUri: string | string[]
+): Promise<BillDocument> {
+  if (Array.isArray(imageUri)) {
+    return scanBillPages(imageUri);
+  }
   const raw = await NativeCardLens.scanBill(imageUri);
   return raw as unknown as BillDocument;
 }
 
 /**
+ * Multi-page bill & invoice tabular data extractor.
+ */
+export async function scanBillPages(
+  imageUris: string[]
+): Promise<BillDocument> {
+  if (!imageUris || imageUris.length === 0) {
+    throw new Error('scanBillPages requires at least one image URI');
+  }
+  if (imageUris.length === 1) {
+    const single = await NativeCardLens.scanBill(imageUris[0]!);
+    return single as unknown as BillDocument;
+  }
+  const raw = await NativeCardLens.scanBillPages(imageUris);
+  return raw as unknown as BillDocument;
+}
+
+/**
  * Universal auto-routing document scanner (Phase 6).
+ * Supports both single images and multi-page document sequences.
  *
  * Automatically detects whether the scanned document is a Business Card
  * or a Bill/Invoice using on-device rule heuristics, and routes to the
@@ -233,22 +282,56 @@ export async function scanBill(imageUri: string): Promise<BillDocument> {
  *  - If invoice/bill keywords found -> runs `scanBill()` -> returns `{ type: 'bill', data: BillDocument }`
  *  - Otherwise -> runs `scanCard()` -> returns `{ type: 'card', data: BusinessCard }`
  *
- * @param imageUri  `file://` or `content://` URI of the image to scan.
+ * @param imageUri  `file://` or `content://` URI of the image to scan, or array of page URIs.
  * @returns         `DocumentScanResult` containing the detected document type and structured data.
  *
  * @example
  * ```ts
  * const result = await scanDocument(scan.imageUri);
- * if (result.type === 'bill') {
- *   console.log('Bill line items:', result.data.lineItems);
- * } else {
- *   console.log('Card contact persons:', result.data.contactPersons);
- * }
+ * const multiResult = await scanDocument(scan.imageUris);
  * ```
  */
 export async function scanDocument(
-  imageUri: string
+  imageUri: string | string[]
 ): Promise<DocumentScanResult> {
+  if (Array.isArray(imageUri)) {
+    return scanDocumentPages(imageUri);
+  }
   const raw = await NativeCardLens.scanDocument(imageUri);
   return raw as unknown as DocumentScanResult;
 }
+
+/**
+ * Multi-page universal auto-routing document scanner.
+ */
+export async function scanDocumentPages(
+  imageUris: string[]
+): Promise<DocumentScanResult> {
+  if (!imageUris || imageUris.length === 0) {
+    throw new Error('scanDocumentPages requires at least one image URI');
+  }
+  if (imageUris.length === 1) {
+    const single = await NativeCardLens.scanDocument(imageUris[0]!);
+    return single as unknown as DocumentScanResult;
+  }
+  const raw = await NativeCardLens.scanDocumentPages(imageUris);
+  return raw as unknown as DocumentScanResult;
+}
+
+// ─── Local Neural LLM Engine (Free On-Device AI) ─────────────────────────────
+export {
+  AVAILABLE_LOCAL_MODELS,
+  BUSINESS_CARD_GBNF_GRAMMAR,
+  buildCardExtractionPrompt,
+  enhanceWithLocalLLM,
+  runLocalSemanticExtraction,
+  checkLocalModelStatus,
+  downloadLocalModel,
+  deleteLocalModel,
+} from './LocalCardLLM';
+export type {
+  LocalLLMOptions,
+  LocalModelDescriptor,
+  ModelDownloadProgress,
+  ModelStatus,
+} from './LocalCardLLM';

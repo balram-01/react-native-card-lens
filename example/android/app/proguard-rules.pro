@@ -8,3 +8,6 @@
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
 # Add any project specific keep options here:
+
+# llama.rn — Keep native JNI classes from being stripped in release builds
+-keep class com.rnllama.** { *; }

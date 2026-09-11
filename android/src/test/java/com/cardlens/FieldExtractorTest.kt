@@ -71,6 +71,17 @@ class FieldExtractorTest {
         assertEquals("help.desk-sales@sub.domain.org", emails[1])
     }
 
+    @Test
+    fun `auto-heals common OCR domain typos like gmai1 and hotma1l`() {
+        val text = "Contact: john.doe@gmai1.com, support@hotma1l.com, admin(c)out1ook.com"
+        val emails = FieldExtractor.extractEmails(text)
+
+        assertEquals(3, emails.size)
+        assertTrue(emails.contains("john.doe@gmail.com"))
+        assertTrue(emails.contains("support@hotmail.com"))
+        assertTrue(emails.contains("admin@outlook.com"))
+    }
+
     // ── Websites ─────────────────────────────────────────────────────────────
 
     @Test

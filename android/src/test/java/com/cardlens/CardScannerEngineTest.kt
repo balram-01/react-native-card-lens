@@ -110,7 +110,7 @@ class CardScannerEngineTest {
         assertEquals(1, card.contactPersons.size)
         assertEquals("Dr. Arvind Kelkar", card.contactPersons[0].name)
         assertEquals("Managing Director", card.contactPersons[0].role)
-        assertTrue(card.phoneNumbers.any { it.contains("98220 11223") })
+        assertTrue(card.phoneNumbers.any { it.contains("9822011223") })
         assertEquals("arvind@quantumdynamics.in", card.email)
         assertEquals("https://quantumdynamics.in", card.website)
         assertTrue(card.addressLines.any { it.contains("Baner Road") })

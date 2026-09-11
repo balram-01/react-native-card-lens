@@ -73,7 +73,7 @@ object BillScannerEngine {
 
     // ── Document Type Keywords ───────────────────────────────────────────────
     private val DOC_TYPES = listOf(
-        "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "INVOICE",
+        "GOOD FAITH ESTIMATE", "ESTIMATE", "TAX INVOICE", "COMMERCIAL INVOICE", "PROFORMA INVOICE", "INVOICE",
         "BILL OF SUPPLY", "MEDICAL CLAIM", "HEALTH INSURANCE CLAIM",
         "HOSPITAL BILL", "CASH RECEIPT", "RECEIPT", "BILL"
     )
@@ -89,12 +89,13 @@ object BillScannerEngine {
     // ── Summary / Totals Stop Keywords ───────────────────────────────────────
     private val SUMMARY_KEYWORDS = setOf(
         "TOTAL", "SUBTOTAL", "SUB TOTAL", "AMOUNT DUE", "TOTAL DUE", "GRAND TOTAL",
-        "NET AMOUNT", "BALANCE DUE", "TAX", "GST", "CGST", "SGST", "IGST"
+        "NET AMOUNT", "BALANCE DUE", "TAX", "GST", "CGST", "SGST", "IGST",
+        "AMOUNT OWED", "TOTAL OWED"
     )
 
     // ── Regex Extractors ─────────────────────────────────────────────────────
     private val INVOICE_NO_REGEX = Regex(
-        "(?i)(?:invoice|inv|bill|receipt|claim|memo)\\s*(?:(?:no|#|num|number)[.:\\s-]*|[:#-])\\s*([A-Za-z0-9][A-Za-z0-9\\/-]{2,25})"
+        "(?i)(?:invoice|inv|bill|receipt|claim|memo|estimate)\\s*(?:(?:no|#|num|number)[.:\\s-]*|[:#-])\\s*([A-Za-z0-9][A-Za-z0-9\\/-]{2,25})"
     )
 
     private val DUE_DATE_REGEX = Regex(
@@ -110,11 +111,11 @@ object BillScannerEngine {
     )
 
     private val SUBTOTAL_REGEX = Regex(
-        "(?i)(?:sub\\s*total|taxable\\s*value|taxable\\s*amount|subtotal)[:\\s]*[$₹€£]?\\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\\.[0-9]{1,2})?)"
+        "(?i)(?:sub\\s*total|taxable\\s*value|taxable\\s*amount|subtotal|estimated\\s*cost|total\\s*estimated\\s*cost)[:\\s]*[$₹€£]?\\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\\.[0-9]{1,2})?)"
     )
 
     private val AMOUNT_DUE_REGEX = Regex(
-        "(?i)(?:amount\\s*due|total\\s*amount|total\\s*due|net\\s*amount|grand\\s*total|balance\\s*due|total\\s*payable|total\\s*charges|balance)[:\\s]*[$₹€£]?\\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\\.[0-9]{1,2})?)"
+        "(?i)(?:amount\\s*due|total\\s*amount|total\\s*due|net\\s*amount|grand\\s*total|balance\\s*due|total\\s*payable|total\\s*charges|balance|totals?|amount\\s*owed|total\\s*owed|patient\\s*responsibility|you\\s*owe)[:\\s]*[$₹€£]?\\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\\.[0-9]{1,2})?)"
     )
 
     private val AMOUNT_PARSE_REGEX = Regex("[$₹€£\\s,]")

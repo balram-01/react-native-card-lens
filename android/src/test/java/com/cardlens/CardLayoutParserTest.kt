@@ -246,4 +246,23 @@ class CardLayoutParserTest {
         assertFalse("Address line should have trailing phone stripped", layout.addressLines[0].contains("8888120511"))
         assertTrue(layout.addressLines[1].contains("Res Add"))
     }
+
+    @Test
+    fun `guessPersonAndRole extracts legal and medical specialized roles`() {
+        val lines = listOf(
+            RawLine("Adv. Sneha Kulkarni", BoundingBox(50, 100, 300, 120)),
+            RawLine("Managing Partner & Legal Counsel", BoundingBox(50, 125, 350, 145)),
+            RawLine("Dr. Rohit Mehra", BoundingBox(400, 100, 600, 120)),
+            RawLine("Chief Surgeon & Consultant", BoundingBox(400, 125, 650, 145))
+        )
+
+        val columns = listOf(lines.subList(0, 2), lines.subList(2, 4))
+        val persons = CardLayoutParser.guessPersonAndRole(columns)
+
+        assertEquals(2, persons.size)
+        assertEquals("Adv. Sneha Kulkarni", persons[0].name)
+        assertEquals("Managing Partner & Legal Counsel", persons[0].role)
+        assertEquals("Dr. Rohit Mehra", persons[1].name)
+        assertEquals("Chief Surgeon & Consultant", persons[1].role)
+    }
 }

@@ -84,3 +84,7 @@ android/generated
 
 # React Native Nitro Modules
 nitrogen/
+
+# Dist / build outputs
+example/dist/
+example/android/app/src/main/assets/ggml-hexagon/

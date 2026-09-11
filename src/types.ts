@@ -73,7 +73,7 @@ export interface BarcodeResult {
 
 // ─── Script selector ─────────────────────────────────────────────────────────
 
-export type OcrScript = 'latin' | 'devanagari';
+export type OcrScript = 'latin' | 'devanagari' | 'auto';
 
 // ─── Document Scanner (Live Camera UI) ───────────────────────────────────────
 
@@ -93,7 +93,7 @@ export interface DocumentScannerOptions {
   allowGalleryImport?: boolean;
   /** Whether to automatically run OCR on the scanned image immediately. Default: true */
   autoOcr?: boolean;
-  /** Which OCR script to use if autoOcr is enabled ('latin' | 'devanagari'). Default: 'latin' */
+  /** Which OCR script to use if autoOcr is enabled ('latin' | 'devanagari' | 'auto'). Default: 'auto' */
   script?: OcrScript;
 }
 
@@ -131,14 +131,39 @@ export interface CardLayoutFields {
   addressLines: string[];
 }
 
+export interface LabeledPhone {
+  number: string;
+  label?: string;
+}
+
 // ─── Business Card (Phase 4 Unified Card Object) ────────────────────────────
 
 export interface BusinessCard {
   companyName?: string;
   tagline?: string;
+  slogan?: string;
   contactPersons: { name: string; role?: string }[];
   phoneNumbers: string[];
+  labeledPhones?: LabeledPhone[];
+  /**
+   * All extracted email addresses (primary is emails[0]).
+   * Cards can have multiple emails (e.g. personal + work).
+   */
+  emails: string[];
+  /**
+   * Backwards-compat alias for emails[0].
+   * @deprecated Use `emails[0]` instead.
+   */
   email?: string;
+  /**
+   * All extracted website URLs (primary is websites[0]).
+   * Cards can have multiple websites.
+   */
+  websites: string[];
+  /**
+   * Backwards-compat alias for websites[0].
+   * @deprecated Use `websites[0]` instead.
+   */
   website?: string;
   addressLines: string[];
   pincode?: string;

@@ -52,4 +52,25 @@ android {
 
 dependencies {
   implementation "com.facebook.react:react-android"
+
+  // ── ML Kit: Text Recognition ────────────────────────────────────────────────
+  // Unbundled variants: models are downloaded once via Google Play Services on
+  // first use (~0 MB APK impact). Switch to the '-bundled-' artifact variants
+  // if you need the models baked into the APK (adds ≈3 MB Latin / ≈13 MB
+  // Devanagari but removes the Play-Services requirement entirely).
+  implementation "com.google.mlkit:text-recognition:16.0.1"
+  implementation "com.google.mlkit:text-recognition-devanagari:16.0.1"
+
+  // ── ML Kit: Barcode Scanning ────────────────────────────────────────────────
+  // Unbundled. Supports QR, Data Matrix, PDF417, Aztec, EAN, UPC, Code 39/93/128.
+  implementation "com.google.mlkit:barcode-scanning:17.3.0"
+
+  // ── ML Kit: Document Scanner API ───────────────────────────────────────────
+  // Google's on-device document scanner UI. Provides camera viewfinder,
+  // real-time edge detection, auto-capture, auto-crop, and image cleaning.
+  // Requires NO camera permissions from the app (handled by Play Services).
+  implementation "com.google.android.gms:play-services-mlkit-document-scanner:16.0.0"
+
+  // ── Unit Testing ────────────────────────────────────────────────────────────
+  testImplementation "junit:junit:4.13.2"
 }

@@ -16,6 +16,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizerOptionsInterface
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
@@ -48,7 +49,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   }
 
   // Dedicated background thread pool for all heavy image decodes, OCR processing, and spatial parsing
-  private val backgroundExecutor: ExecutorService = Executors.newFixedThreadPool(2)
+  private val backgroundExecutor: ExecutorService = Executors.newCachedThreadPool()
 
   // State held during active scanner session
   private var pendingScanPromise: Promise? = null
@@ -224,8 +225,8 @@ class CardLensModule(reactContext: ReactApplicationContext) :
         val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
 
         val options: TextRecognizerOptionsInterface = when (script.lowercase()) {
-          "latin" -> TextRecognizerOptions.DEFAULT_OPTIONS
-          else    -> DevanagariTextRecognizerOptions.Builder().build()
+          "devanagari" -> DevanagariTextRecognizerOptions.Builder().build()
+          else         -> TextRecognizerOptions.DEFAULT_OPTIONS
         }
 
         val recognizer = TextRecognition.getClient(options)
@@ -417,22 +418,19 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     val qrCodeData: String?
   )
 
-  private fun scanBarcodeSafely(imageUri: String, onResult: (String?) -> Unit) {
-    backgroundExecutor.execute {
-      try {
-        val barcodeImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
-        val barcodeScanner = BarcodeScanning.getClient()
-        barcodeScanner.process(barcodeImage)
-          .addOnSuccessListener(backgroundExecutor) { barcodes ->
-            val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
-            onResult(qrBarcode?.rawValue)
-          }
-          .addOnFailureListener(backgroundExecutor) {
-            onResult(null)
-          }
-      } catch (e: Exception) {
-        onResult(null)
-      }
+  private fun scanBarcodeSafely(inputImage: InputImage, onResult: (String?) -> Unit) {
+    try {
+      val barcodeScanner = BarcodeScanning.getClient()
+      barcodeScanner.process(inputImage)
+        .addOnSuccessListener(backgroundExecutor) { barcodes ->
+          val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
+          onResult(qrBarcode?.rawValue)
+        }
+        .addOnFailureListener(backgroundExecutor) {
+          onResult(null)
+        }
+    } catch (e: Exception) {
+      onResult(null)
     }
   }
 
@@ -443,40 +441,63 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   ) {
     backgroundExecutor.execute {
       try {
-        val devImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
-        val latinImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
-        val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+        // Load InputImage once from disk and share with all detectors
+        val inputImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
         val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-        devanagariRecognizer.process(devImage)
-          .addOnSuccessListener(backgroundExecutor) { devVisionText ->
-            val devText = devVisionText.text
-            val devBlocks = toRawBlocks(devVisionText)
+        // 1. Run zero-download, pre-installed Latin recognizer first (< 200ms)
+        latinRecognizer.process(inputImage)
+          .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
+            val latinText = latinVisionText.text
+            val latinBlocks = toRawBlocks(latinVisionText)
 
-            latinRecognizer.process(latinImage)
-              .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
-                val latinText = latinVisionText.text
-                val latinBlocks = toRawBlocks(latinVisionText)
-                val fusedBlocks = CardScannerEngine.fuseOcrBlocks(latinBlocks, devBlocks)
-                val fusedText = CardScannerEngine.fuseRawText(latinText, devText)
-                scanBarcodeSafely(imageUri) { qrCode ->
-                  onSuccess(PageOcrData(fusedText, fusedBlocks, qrCode))
+            // If Latin pass produced sufficient text and has no Devanagari codepoints,
+            // return immediately in sub-second time without triggering slow model downloads.
+            if (!ScriptDetector.shouldRerunWithDevanagari(latinText)) {
+              scanBarcodeSafely(inputImage) { qrCode ->
+                onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
+              }
+            } else {
+              // Hindi/Marathi or low-density card: attempt Devanagari recognizer
+              try {
+                val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+                devanagariRecognizer.process(inputImage)
+                  .addOnSuccessListener(backgroundExecutor) { devVisionText ->
+                    val devText = devVisionText.text
+                    val devBlocks = toRawBlocks(devVisionText)
+                    val fusedBlocks = CardScannerEngine.fuseOcrBlocks(latinBlocks, devBlocks)
+                    val fusedText = CardScannerEngine.fuseRawText(latinText, devText)
+                    scanBarcodeSafely(inputImage) { qrCode ->
+                      onSuccess(PageOcrData(fusedText, fusedBlocks, qrCode))
+                    }
+                  }
+                  .addOnFailureListener(backgroundExecutor) {
+                    // If Devanagari model download fails or times out, safely return Latin result
+                    scanBarcodeSafely(inputImage) { qrCode ->
+                      onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
+                    }
+                  }
+              } catch (e: Exception) {
+                scanBarcodeSafely(inputImage) { qrCode ->
+                  onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
                 }
               }
-              .addOnFailureListener(backgroundExecutor) {
-                scanBarcodeSafely(imageUri) { qrCode ->
-                  onSuccess(PageOcrData(devText, devBlocks, qrCode))
-                }
-              }
+            }
           }
-          .addOnFailureListener(backgroundExecutor) {
-            latinRecognizer.process(latinImage)
-              .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
-                scanBarcodeSafely(imageUri) { qrCode ->
-                  onSuccess(PageOcrData(latinVisionText.text, toRawBlocks(latinVisionText), qrCode))
+          .addOnFailureListener(backgroundExecutor) { latinError ->
+            // If Latin recognition failed, attempt Devanagari recognizer as fallback
+            try {
+              val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+              devanagariRecognizer.process(inputImage)
+                .addOnSuccessListener(backgroundExecutor) { devVisionText ->
+                  scanBarcodeSafely(inputImage) { qrCode ->
+                    onSuccess(PageOcrData(devVisionText.text, toRawBlocks(devVisionText), qrCode))
+                  }
                 }
-              }
-              .addOnFailureListener(backgroundExecutor) { e -> onError(e) }
+                .addOnFailureListener(backgroundExecutor) { e -> onError(e) }
+            } catch (e: Exception) {
+              onError(latinError)
+            }
           }
       } catch (e: Exception) {
         onError(e)
@@ -537,6 +558,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
             companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
             tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
             slogan = cards.firstOrNull { !it.slogan.isNullOrBlank() }?.slogan,
+            providedServices = cards.flatMap { it.providedServices }.distinct(),
             contactPersons = cards.flatMap { it.contactPersons }.distinctBy { it.name.trim().lowercase() },
             phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
             labeledPhones = cards.flatMap { it.labeledPhones }.distinctBy { it.number },

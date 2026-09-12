@@ -561,5 +561,145 @@ class RealTestCardsTest {
         // Ensure products (sofa, dining, almirah, fridge) are not false contact persons
         assertFalse("Furniture/goods should NOT be contact persons", refined.contactPersons.any { it.name.contains("सोफा") || it.name.contains("कपाट") || it.name.contains("टेबल") })
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 14. OM Industries / Isco Switchgears (Products list, 'OM' company, Email healing)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `extracts fields from OM Industries Isco Switchgears card without treating services as company`() {
+        val ocrText = """
+            OM INDUSTRIES
+            Isco SWITCHGEARS
+            Anil Mittal
+            9999999999, 8888888888
+            MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc.
+            Mohan Nagar, Industrial Area, Delhi-110028 (INDIA)
+            iscoswitchgearsfdxyz.com
+        """.trimIndent()
+
+        // 1. Invocations check: 'OM INDUSTRIES' must NOT be classified as religious invocation
+        assertFalse("OM INDUSTRIES must NOT be classified as religious invocation",
+            CardLayoutParser.isReligiousInvocation("OM INDUSTRIES"))
+
+        // 2. Product list check: 'MCB Box...' must be recognized as product list
+        val serviceLine = "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc."
+        assertTrue("Must detect product/service list", CardLayoutParser.looksLikeProductOrServiceList(serviceLine))
+
+        val parsedServices = CardLayoutParser.parseServicesList(serviceLine)
+        assertEquals(5, parsedServices.size)
+        assertTrue(parsedServices.contains("MCB Box"))
+        assertTrue(parsedServices.contains("Junction Box"))
+        assertTrue(parsedServices.contains("Fan Box"))
+        assertTrue(parsedServices.contains("Modular Box"))
+        assertTrue(parsedServices.contains("Concealed Box"))
+
+        // 3. Email healing check: iscoswitchgearsfdxyz.com -> iscoswitchgears@xyz.com
+        val emails = FieldExtractor.extractEmails(ocrText)
+        assertEquals(1, emails.size)
+        assertEquals("iscoswitchgears@xyz.com", emails[0])
+
+        // Website should NOT be falsely extracted from healed email
+        val websites = FieldExtractor.extractWebsites(ocrText)
+        assertTrue("Healed email domain should not become a website", websites.isEmpty())
+
+        // 4. Phones: 2 numbers
+        val phones = FieldExtractor.extractPhoneNumbers(ocrText)
+        assertEquals(2, phones.size)
+        assertTrue(phones.contains("9999999999"))
+        assertTrue(phones.contains("8888888888"))
+
+        // 5. Layout & Thinking Module check
+        val refined = ThinkingModuleEngine.refineCard(ocrText)
+
+        // Company Name MUST be OM INDUSTRIES or Isco Switchgears, NOT the product list!
+        assertNotNull(refined.companyName)
+        assertTrue("Company name should be OM INDUSTRIES, was: ${refined.companyName}",
+            refined.companyName!!.contains("OM INDUSTRIES", ignoreCase = true) || refined.companyName!!.contains("SWITCHGEARS", ignoreCase = true))
+        assertFalse("Company name must NEVER be the product list",
+            refined.companyName!!.contains("Box", ignoreCase = true))
+
+        // Provided services must be populated
+        assertTrue("Provided services must be extracted", refined.providedServices.isNotEmpty())
+        assertTrue(refined.providedServices.contains("MCB Box"))
+
+        // Contact Person: Anil Mittal
+        assertEquals(1, refined.contactPersons.size)
+        assertEquals("Anil Mittal", refined.contactPersons[0].name)
+
+        // Email healed
+        assertEquals(1, refined.emails.size)
+        assertEquals("iscoswitchgears@xyz.com", refined.emails[0])
+
+        // Address & Pincode
+        assertEquals("110028", refined.pincode)
+        assertTrue(refined.addressLines.any { it.contains("Mohan Nagar") || it.contains("Industrial Area") })
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 15. Thinking Module Prompt & JSON Response Parsing
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `buildExtractionPrompt contains accuracy rules and parseJsonResponse extracts providedServices`() {
+        val ocrText = "OM INDUSTRIES\nAnil Mittal\n9999999999\nMCB Box, Fan Box etc."
+        val prompt = ThinkingModuleEngine.buildExtractionPrompt(ocrText)
+
+        // Verify prompt rules
+        assertTrue(prompt.contains("CRITICAL DISAMBIGUATION & ACCURACY RULES"))
+        assertTrue(prompt.contains("providedServices"))
+        assertTrue(prompt.contains("NEGATIVE CONSTRAINT"))
+        assertTrue(prompt.contains("NEVER extract product catalogs"))
+
+        // Verify JSON response parsing
+        val mockLlmResponse = """
+            {
+              "companyName": "OM INDUSTRIES",
+              "tagline": "Switchgears & Electricals",
+              "slogan": null,
+              "providedServices": [
+                "MCB Box",
+                "Junction Box",
+                "Fan Box",
+                "Modular Box",
+                "Concealed Box"
+              ],
+              "contactPersons": [
+                {
+                  "name": "Anil Mittal",
+                  "role": "Director"
+                }
+              ],
+              "phoneNumbers": [
+                "9999999999",
+                "8888888888"
+              ],
+              "emails": [
+                "iscoswitchgears@xyz.com"
+              ],
+              "websites": [],
+              "addresses": [
+                "Mohan Nagar, Industrial Area, Delhi"
+              ],
+              "pincode": "110028",
+              "gstin": null
+            }
+        """.trimIndent()
+
+        val parsed = ThinkingModuleEngine.parseJsonResponse(mockLlmResponse, ocrText)
+        assertNotNull(parsed)
+        assertEquals("OM INDUSTRIES", parsed!!.companyName)
+        assertEquals("Switchgears & Electricals", parsed.tagline)
+        assertEquals(5, parsed.providedServices.size)
+        assertTrue(parsed.providedServices.contains("MCB Box"))
+        assertTrue(parsed.providedServices.contains("Concealed Box"))
+        assertEquals(1, parsed.contactPersons.size)
+        assertEquals("Anil Mittal", parsed.contactPersons[0].name)
+        assertEquals("Director", parsed.contactPersons[0].role)
+        assertEquals(2, parsed.phoneNumbers.size)
+        assertEquals(1, parsed.emails.size)
+        assertEquals("iscoswitchgears@xyz.com", parsed.emails[0])
+        assertEquals("110028", parsed.pincode)
+    }
 }
 

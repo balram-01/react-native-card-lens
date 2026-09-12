@@ -139,44 +139,4 @@ export interface Spec extends TurboModule {
   ): Promise<string>;
 }
 
-const CardLensModule =
-  TurboModuleRegistry.get<Spec>('CardLens') ??
-  ((global as any).__turboModuleProxy != null
-    ? TurboModuleRegistry.getEnforcing<Spec>('CardLens')
-    : ({
-        recognizeText: () => Promise.resolve({ blocks: [], rawText: '' }),
-        scanBarcodes: () => Promise.resolve([]),
-        startScanner: () => Promise.resolve({ imageUri: '', imageUris: [] }),
-        extractContactFields: () =>
-          Promise.resolve({
-            phoneNumbers: [],
-            emails: [],
-            websites: [],
-            gstin: [],
-            pincodes: [],
-          }),
-        extractCardLayout: () =>
-          Promise.resolve({
-            contactPersons: [],
-            addressLines: [],
-          }),
-        scanCard: () =>
-          Promise.resolve({
-            contactPersons: [],
-            phoneNumbers: [],
-            emails: [],
-            websites: [],
-            addressLines: [],
-            rawText: '',
-          }),
-        scanCardPages: () => Promise.resolve({}),
-        scanBill: () => Promise.resolve({ lineItems: [], rawText: '' }),
-        scanBillPages: () => Promise.resolve({}),
-        scanDocument: () => Promise.resolve({ type: 'card', data: {} }),
-        scanDocumentPages: () => Promise.resolve({}),
-        isThinkingModelReady: () => Promise.resolve(false),
-        refineCardWithThinkingModule: () => Promise.resolve({}),
-        downloadThinkingModel: () => Promise.resolve(''),
-      } as unknown as Spec));
-
-export default CardLensModule as Spec;
+export default TurboModuleRegistry.getEnforcing<Spec>('CardLens');

@@ -108,6 +108,12 @@ object FieldExtractor {
             .replace(Regex("(?i)@(yah00|yaho0|yah0o)\\.com"), "@yahoo.com")
             .replace(Regex("(?i)@(red1ffmail|rediffmai1)\\.com"), "@rediffmail.com")
 
+        // Fix OCR character-confusion for @ (e.g. fd, cl, (a), [a] before domain name)
+        // Handles "iscoswitchgearsfdxyz.com" -> "iscoswitchgears@xyz.com"
+        text = text.replace(Regex("(?i)\\b([a-zA-Z0-9._%+\\-]{3,})(?:fd|cl|\\(a\\)|\\[a\\])([a-zA-Z0-9.-]+\\.(?:com|in|co\\.in|org|net|io|ai|xyz|gov|edu))\\b")) { mr ->
+            "${mr.groupValues[1]}@${mr.groupValues[2]}"
+        }
+
         // Heal accidental space around @ or . in email addresses: e.g. "bharatsports29@gmail. com" -> "bharatsports29@gmail.com"
         text = text.replace(Regex("(?i)([a-zA-Z0-9._%+\\-]+)\\s*@\\s*([a-zA-Z0-9.\\-]+)\\s*\\.\\s*([a-zA-Z]{2,})")) { mr ->
             "${mr.groupValues[1]}@${mr.groupValues[2].replace(" ", "")}.${mr.groupValues[3]}"

@@ -6,7 +6,7 @@ import type { BusinessCard } from './types';
  * Prevents markdown fences, trailing commas, and hallucinated keys.
  */
 export const BUSINESS_CARD_GBNF_GRAMMAR = `
-root ::= "{" ws "\\"companyName\\":" ws (string | "null") "," ws "\\"tagline\\":" ws (string | "null") "," ws "\\"contactPersons\\":" ws persons "," ws "\\"phoneNumbers\\":" ws stringlist "," ws "\\"emails\\":" ws stringlist "," ws "\\"websites\\":" ws stringlist "," ws "\\"addressLines\\":" ws stringlist "," ws "\\"pincode\\":" ws (string | "null") "," ws "\\"gstin\\":" ws (string | "null") "}"
+root ::= "{" ws "\\"companyName\\":" ws (string | "null") "," ws "\\"tagline\\":" ws (string | "null") "," ws "\\"providedServices\\":" ws stringlist "," ws "\\"contactPersons\\":" ws persons "," ws "\\"phoneNumbers\\":" ws stringlist "," ws "\\"emails\\":" ws stringlist "," ws "\\"websites\\":" ws stringlist "," ws "\\"addressLines\\":" ws stringlist "," ws "\\"pincode\\":" ws (string | "null") "," ws "\\"gstin\\":" ws (string | "null") "}"
 persons ::= "[" ws (person ("," ws person)*)? ws "]"
 person ::= "{" ws "\\"name\\":" ws string "," ws "\\"role\\":" ws (string | "null") "}"
 stringlist ::= "[" ws (string ("," ws string)*)? ws "]"
@@ -368,24 +368,60 @@ export function buildCardExtractionPrompt(
   rawText: string,
   baseline?: Partial<BusinessCard>
 ): string {
-  const contextSnippet = baseline
-    ? `\nInitial Heuristic Hints:\n- Candidate Company: ${
-        baseline.companyName || 'Unknown'
-      }\n- Candidate Tagline: ${
-        baseline.tagline || 'None'
-      }\n- Extracted Phones: ${(baseline.phoneNumbers || []).join(', ')}`
-    : '';
+  const hints: string[] = [];
+  if (baseline?.companyName)
+    hints.push(`Heuristic Company: "${baseline.companyName}"`);
+  if (baseline?.tagline) hints.push(`Heuristic Tagline: "${baseline.tagline}"`);
+  if (baseline?.providedServices && baseline.providedServices.length > 0) {
+    hints.push(
+      `Detected Offerings/Products: ${baseline.providedServices.join(', ')}`
+    );
+  }
+  if (baseline?.phoneNumbers && baseline.phoneNumbers.length > 0) {
+    hints.push(`Detected Phone Numbers: ${baseline.phoneNumbers.join(', ')}`);
+  }
+  const contextSnippet =
+    hints.length > 0
+      ? `\n\nOCR Pre-Analysis Context:\n${hints.map((h) => `- ${h}`).join('\n')}`
+      : '';
 
   return `<|im_start|>system
-You are an expert multilingual document intelligence assistant running on-device.
-Analyze the following OCR text from a business card and extract structured information.
-Rules:
-1. Identify company name and brand (do not mistake owner's name for company).
-2. Extract all contact persons with their precise professional roles/designations.
-3. Extract clean phone numbers (10 digits for Indian mobiles, international numbers with +).
-4. Extract all valid email addresses (heal OCR character typos like gmai1 -> gmail).
-5. Extract street address lines, pincode/zip code, and statutory tax IDs (GSTIN).
-Output strictly in valid JSON adhering to the provided schema.<|im_end|>
+You are an expert on-device document intelligence AI specializing in business cards and corporate identity.
+Your task is to accurately extract structured business card entities from OCR text with 100% precision.
+
+CRITICAL DISAMBIGUATION & ACCURACY RULES:
+1. COMPANY & BRAND NAME ("companyName", "tagline"):
+   - "companyName": Extract ONLY the primary commercial enterprise, organization, corporate, or brand name (e.g., "OM INDUSTRIES", "Tata Consultancy Services", "Bharat Sports", "Cakes Inn").
+   - NEGATIVE CONSTRAINT: NEVER put product or service catalogs (e.g., "MCB Box, Fan Box, Modular Box", "Printing, Xerox, Lamination") into "companyName".
+   - NEGATIVE CONSTRAINT: NEVER put an individual person's name (e.g., "Anil Mittal") into "companyName".
+   - If secondary branding/specialty is present (e.g. "Isco SWITCHGEARS"), assign it to "tagline" or "companyName".
+
+2. PROVIDED SERVICES & PRODUCTS ("providedServices"):
+   - Extract comma-separated product catalogs, manufactured goods, or business offerings into an array of clean string items.
+   - Example: "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc." -> ["MCB Box", "Junction Box", "Fan Box", "Modular Box", "Concealed Box"].
+   - Strip trailing "etc.", "and more", or ellipses.
+
+3. CONTACT PERSONS ("contactPersons"):
+   - Extract human individual names and their professional titles/designations: [{"name": "Anil Mittal", "role": null}].
+   - If no explicit designation is printed, set "role" to null.
+   - NEGATIVE CONSTRAINT: Do NOT extract locations, buildings, industrial areas, or company names as persons.
+
+4. PHONE NUMBERS ("phoneNumbers"):
+   - Extract all 10-digit mobile or landline numbers (clean of dashes, spaces, and OCR noise).
+
+5. EMAILS & WEBSITES ("emails", "websites"):
+   - Correct common OCR scanning errors in emails (e.g., "@" misrecognized as "fd", "cl", "(a)", or "8" before domains like "xyz.com" or "gmail.com").
+   - A string containing "@" is an EMAIL, NEVER a website.
+   - "websites" must be clean domains or URLs (e.g., "www.example.com", "example.com"). Must NOT contain "@".
+
+6. ADDRESS & LOCATION ("addressLines", "pincode"):
+   - Extract physical address lines. Fix clipped prefixes from map pin icons (e.g., "Mohan Nagar" not "ohan Nagar", "Delhi" not "Dethi").
+   - Extract 6-digit postal PIN/ZIP code if present.
+
+7. STATUTORY TAX IDENTIFIERS ("gstin"):
+   - Extract 15-character GSTIN tax number if present.
+
+Output strictly valid JSON conforming to the schema.<|im_end|>
 <|im_start|>user
 Raw OCR Card Text:
 ${rawText}${contextSnippet}
@@ -523,6 +559,11 @@ export async function enhanceWithLocalLLM(
         return {
           companyName: parsed.companyName || card.companyName,
           tagline: parsed.tagline || card.tagline,
+          providedServices:
+            Array.isArray(parsed.providedServices) &&
+            parsed.providedServices.length > 0
+              ? parsed.providedServices.map(String)
+              : card.providedServices,
           contactPersons:
             Array.isArray(parsed.contactPersons) &&
             parsed.contactPersons.length > 0

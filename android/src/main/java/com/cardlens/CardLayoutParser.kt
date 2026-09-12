@@ -59,7 +59,8 @@ object CardLayoutParser {
         "AUTO", "ELECTRONICS", "OPTICAL", "CLINIC", "DENTAL", "LAB", "SALON",
         "SPA", "FITNESS", "GYM", "TRAVELS", "LOGISTICS", "TELECOM", "COMMUNICATIONS",
         "COMMUNICATION", "CONSULTANCY", "ASTROLOGICAL", "ASTROLOGY",
-        "FURNITURE", "STEEL",
+        "FURNITURE", "STEEL", "SWITCHGEARS", "SWITCHGEAR", "ELECTRICALS", "ELECTRICAL",
+        "LIGHTING", "POWER SYSTEMS",
         // Short but unambiguous
         "CORP", "CO.", "CO", "GROUP", "ASSOCIATES"
     )
@@ -272,13 +273,39 @@ object CardLayoutParser {
         val tagline = guessTagline(allLines, companyBlock, addressLines, usedLineTexts)
         if (tagline != null) usedLineTexts.add(tagline.trim())
 
+        // 6. Guess Provided Services & Offerings (lists of products / goods / offerings)
+        val providedServices = guessProvidedServices(allLines, usedLineTexts)
+        providedServices.forEach { usedLineTexts.add(it.trim()) }
+
         return CardLayoutFields(
             companyName = companyName,
             tagline = tagline ?: slogan,
             slogan = slogan,
+            providedServices = providedServices,
             contactPersons = contactPersons,
             addressLines = addressLines
         )
+    }
+
+    /**
+     * Extracts lists of offered services, products, or merchandise
+     * (e.g. "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc.").
+     */
+    fun guessProvidedServices(allLines: List<RawLine>, usedLineTexts: Set<String>): List<String> {
+        val serviceLines = allLines.filter { line ->
+            val text = line.text.trim()
+            !usedLineTexts.contains(text) &&
+            !isContactInfo(text) &&
+            !looksLikePureAddress(text) &&
+            !isReligiousInvocation(text) &&
+            looksLikeProductOrServiceList(text)
+        }
+
+        val result = mutableListOf<String>()
+        for (line in serviceLines) {
+            result.addAll(parseServicesList(line.text))
+        }
+        return result.distinct()
     }
 
     // ── Heuristic Functions ──────────────────────────────────────────────────
@@ -321,19 +348,6 @@ object CardLayoutParser {
             .sortedBy { col -> col.firstOrNull()?.boundingBox?.left ?: 0 } // left-to-right column order
     }
 
-    fun isReligiousInvocation(text: String): Boolean {
-        val clean = text.trim()
-        if ((clean.startsWith("॥") || clean.startsWith("||") || clean.startsWith("|")) &&
-            (clean.endsWith("॥") || clean.endsWith("||") || clean.endsWith("|"))) {
-            return true
-        }
-        val lower = clean.lowercase()
-        return RELIGIOUS_INVOCATIONS.any { inv ->
-            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(inv)}(?:$|[^\\p{L}\\p{N}])"
-            Regex(pattern).containsMatchIn(lower)
-        }
-    }
-
     /**
      * Check if a text contains a company/entity indicator.
      * For shorter indicators (< 5 chars), they must appear at the start or end of the text
@@ -352,6 +366,79 @@ object CardLayoutParser {
                 Regex(pattern).containsMatchIn(upper)
             }
         }
+    }
+
+    fun isReligiousInvocation(text: String): Boolean {
+        val clean = text.trim()
+        if ((clean.startsWith("॥") || clean.startsWith("||") || clean.startsWith("|")) &&
+            (clean.endsWith("॥") || clean.endsWith("||") || clean.endsWith("|"))) {
+            return true
+        }
+        // Text containing explicit company indicators (e.g. OM INDUSTRIES, OM ENTERPRISES) is never a religious invocation
+        if (hasCompanyIndicator(clean)) {
+            return false
+        }
+
+        val lower = clean.lowercase()
+        return RELIGIOUS_INVOCATIONS.any { inv ->
+            if (inv.equals("om", ignoreCase = true) || inv == "ॐ" || inv == "ओम") {
+                // "om" is an invocation only if standalone, or very short phrase without commercial words
+                val words = lower.split(Regex("\\s+")).filter { it.isNotBlank() }
+                words.size <= 3 && (lower.matches(Regex("^(?:[|॥]*\\s*)?(?:om|ॐ|ओम)(?:\\s*[|॥]*)?$")) ||
+                    lower.contains("om namah") || lower.contains("om sai") || lower.contains("om shree ganesh"))
+            } else {
+                val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(inv)}(?:$|[^\\p{L}\\p{N}])"
+                Regex(pattern).containsMatchIn(lower)
+            }
+        }
+    }
+
+    /**
+     * Checks whether a text line or block represents a list of offered goods, services, or products
+     * (e.g. "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc.").
+     */
+    fun looksLikeProductOrServiceList(text: String): Boolean {
+        val clean = text.trim()
+        val lower = clean.lowercase()
+
+        val endsWithEtc = lower.endsWith("etc.") || lower.endsWith("etc") ||
+                          lower.endsWith("and more") || lower.endsWith("इत्यादी") || lower.endsWith("आदी")
+
+        val commaCount = clean.count { it == ',' }
+
+        val productKeywords = setOf(
+            "box", "boxes", "mcb", "fan box", "junction box", "modular box", "concealed box",
+            "spares", "parts", "fittings", "pipes", "valves", "cables", "wires", "switches",
+            "switchgears", "hardware", "tools", "motors", "pumps", "appliances", "equipment",
+            "accessories", "goods", "items", "stationery", "garments", "textiles", "fabrics"
+        )
+        val hasProductKw = productKeywords.any { lower.contains(it) }
+
+        val hasOfferingPrefix = lower.startsWith("dealing in") || lower.startsWith("dealers of") ||
+                                lower.startsWith("dealers in") || lower.startsWith("all types of") ||
+                                lower.startsWith("all kinds of") || lower.startsWith("manufacturers of") ||
+                                lower.startsWith("mfg. of") || lower.startsWith("services:") ||
+                                lower.startsWith("products:")
+
+        if (endsWithEtc && commaCount >= 1) return true
+        if (commaCount >= 2 && hasProductKw) return true
+        if (hasOfferingPrefix) return true
+        if (commaCount >= 3) return true
+
+        return false
+    }
+
+    /**
+     * Parses a product/service line into individual clean items.
+     */
+    fun parseServicesList(text: String): List<String> {
+        var clean = text.trim()
+        clean = clean.replace(Regex("(?i)^(?:dealing in|dealers of|dealers in|all types of|all kinds of|manufacturers of|mfg\\. of|services:|products:)\\s*"), "")
+        clean = clean.replace(Regex("(?i)[,\\s]*(?:etc\\.?|and more|इत्यादी|आदी)\\s*$"), "")
+
+        return clean.split(Regex("[,;•▪|]+"))
+            .map { it.trim().trimStart('-', '•', '▪', '*', '✔', '►', '>') }
+            .filter { it.isNotBlank() && it.length > 1 }
     }
 
     fun matchSalutation(text: String): String? {
@@ -392,6 +479,7 @@ object CardLayoutParser {
             text.isNotBlank() &&
             !isReligiousInvocation(text) &&
             !looksLikePureAddress(text) &&
+            !looksLikeProductOrServiceList(text) &&
             // Reject blocks that contain ONLY contact info and NO company indicator
             !(FieldExtractor.extractPhoneNumbers(text).isNotEmpty() &&
               !hasCompanyIndicator(text)) &&
@@ -1009,6 +1097,7 @@ data class CardLayoutFields(
     val companyName: String?,
     val tagline: String?,
     val slogan: String? = null,
+    val providedServices: List<String> = emptyList(),
     val contactPersons: List<ContactPerson>,
     val addressLines: List<String>
 )

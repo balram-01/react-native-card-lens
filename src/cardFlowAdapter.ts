@@ -228,7 +228,11 @@ function extractCityAndState(addressLines: string[]): {
   state: string;
   cleanAddress: string;
 } {
-  const combined = addressLines.join(', ');
+  const combined = addressLines
+    .join(', ')
+    .replace(/\bohan\s+nagar\b/gi, 'Mohan Nagar')
+    .replace(/\bdethi\b/gi, 'Delhi');
+
   let detectedCity = '';
   let detectedState = '';
 
@@ -259,10 +263,15 @@ function extractCityAndState(addressLines: string[]): {
       .filter(Boolean);
     for (const part of parts) {
       if (!/^\d+$/.test(part) && part.length > 2) {
-        if (!detectedCity) detectedCity = part;
+        const cleanPart = part.replace(/\bdethi\b/gi, 'Delhi');
+        if (!detectedCity) detectedCity = cleanPart;
         break;
       }
     }
+  }
+
+  if (detectedCity.toLowerCase() === 'delhi' && !detectedState) {
+    detectedState = 'Delhi';
   }
 
   return {
@@ -314,9 +323,19 @@ export function toCardFlowApiResponse(
   );
 
   const tagline = card.tagline || card.slogan || '';
-  const providedServices = tagline ? [tagline] : [];
+  const providedServices: string[] =
+    Array.isArray(card.providedServices) && card.providedServices.length > 0
+      ? card.providedServices
+      : tagline
+        ? [tagline]
+        : [];
   const category =
-    options.categoryDefault || providedServices[0] || 'General Business';
+    options.categoryDefault ||
+    (companyName.toLowerCase().includes('switchgear') ||
+    tagline.toLowerCase().includes('switchgear') ||
+    card.rawText?.toLowerCase().includes('switchgear')
+      ? 'Switchgears & Electricals'
+      : providedServices[0] || 'General Business');
 
   // Build structured contacts list
   const contacts: CardFlowContact[] =
@@ -810,7 +829,7 @@ export async function startAsyncExtraction(
   (async () => {
     try {
       // Step 1: Preprocess (18%)
-      await new Promise((res) => setTimeout(res, 200));
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
       if (record.aborted) return;
 
       record.currentNode = 'classify';
@@ -820,7 +839,7 @@ export async function startAsyncExtraction(
       notifyJobProgress(record);
 
       // Step 2: Extract (62%)
-      await new Promise((res) => setTimeout(res, 250));
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
       if (record.aborted) return;
 
       record.currentNode = 'extract_business_card';
@@ -875,7 +894,7 @@ export async function startAsyncExtraction(
       record.updatedAt = new Date().toISOString();
       notifyJobProgress(record);
 
-      await new Promise((res) => setTimeout(res, 150));
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
       if (record.aborted) return;
 
       const cardFlowRes = toCardFlowApiResponse(card, { ...options, jobId });
@@ -888,7 +907,7 @@ export async function startAsyncExtraction(
         record.progressPercentage = 92;
         record.updatedAt = new Date().toISOString();
         notifyJobProgress(record);
-        await new Promise((res) => setTimeout(res, 150));
+        await new Promise<void>((resolve) => setTimeout(resolve, 150));
       }
 
       record.currentNode = 'finalize';
@@ -897,7 +916,7 @@ export async function startAsyncExtraction(
       record.updatedAt = new Date().toISOString();
       notifyJobProgress(record);
 
-      await new Promise((res) => setTimeout(res, 100));
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
       // Terminal state
       record.status = cardData.needsHumanReview ? 'needs_review' : 'completed';
@@ -1061,7 +1080,7 @@ export async function pollJobUntilComplete(
       throw new Error(data.errorMessage || 'Extraction failed.');
     }
 
-    await new Promise((res) => setTimeout(res, interval));
+    await new Promise<void>((resolve) => setTimeout(resolve, interval));
   }
 
   throw new Error('Extraction timed out waiting for job completion.');

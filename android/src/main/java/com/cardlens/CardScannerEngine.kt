@@ -34,6 +34,7 @@ data class BusinessCard(
     val companyName: String? = null,
     val tagline: String? = null,
     val slogan: String? = null,
+    val providedServices: List<String> = emptyList(),
     val contactPersons: List<ContactPerson> = emptyList(),
     val phoneNumbers: List<String> = emptyList(),
     val labeledPhones: List<LabeledPhone> = emptyList(),
@@ -65,6 +66,10 @@ data class BusinessCard(
 
         if (slogan != null) map.putString("slogan", slogan)
         else map.putNull("slogan")
+
+        val servicesArray = Arguments.createArray()
+        providedServices.forEach { servicesArray.pushString(it) }
+        map.putArray("providedServices", servicesArray)
 
         val personsArray = Arguments.createArray()
         contactPersons.forEach { person ->
@@ -165,6 +170,7 @@ object CardScannerEngine {
             companyName = layout.companyName,
             tagline = layout.tagline,
             slogan = layout.slogan,
+            providedServices = layout.providedServices,
             contactPersons = layout.contactPersons,
             phoneNumbers = contactFields.phoneNumbers,
             labeledPhones = contactFields.labeledPhones,

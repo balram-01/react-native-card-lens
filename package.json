@@ -92,9 +92,6 @@
     "react": "*",
     "react-native": "*"
   },
-  "workspaces": [
-    "example"
-  ],
   "packageManager": "yarn@4.11.0",
   "react-native-builder-bob": {
     "source": "src",
@@ -141,6 +138,9 @@
     "modulePathIgnorePatterns": [
       "<rootDir>/example/node_modules",
       "<rootDir>/lib/"
+    ],
+    "setupFiles": [
+      "<rootDir>/jest.setup.js"
     ]
   },
   "commitlint": {
@@ -178,5 +178,8 @@
       "vite"
     ],
     "version": "0.63.1"
-  }
+  },
+  "workspaces": [
+    "example"
+  ]
 }

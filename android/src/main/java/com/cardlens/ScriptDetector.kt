@@ -41,21 +41,40 @@ object ScriptDetector {
      */
     fun shouldRerunWithDevanagari(latinText: String): Boolean {
         val trimmed = latinText.trim()
+        if (trimmed.isBlank()) return false
 
         // 1. Direct Devanagari codepoints detected
         if (hasDevanagariCodepoints(trimmed)) {
             return true
         }
 
-        // 2. Very low text density
-        if (trimmed.length < 15) {
+        // 2. Strong Latin indicators: email, website, or domain patterns
+        if (trimmed.contains("@") ||
+            trimmed.contains("http://", ignoreCase = true) ||
+            trimmed.contains("https://", ignoreCase = true) ||
+            trimmed.contains(".com", ignoreCase = true) ||
+            trimmed.contains(".in", ignoreCase = true) ||
+            trimmed.contains(".org", ignoreCase = true) ||
+            trimmed.contains(".net", ignoreCase = true)
+        ) {
+            return false
+        }
+
+        val letters = trimmed.count { it.isLetter() }
+
+        // If card already contains substantial Latin letters, do not rerun
+        if (letters >= 15) {
+            return false
+        }
+
+        // 3. Very sparse non-digit fragment typical of Latin OCR scanning Devanagari glyphs (e.g. "a b")
+        if (trimmed.length in 1..10 && letters < 5 && !trimmed.any { it.isDigit() }) {
             return true
         }
 
-        // 3. Garbled text check: very low letter ratio compared to total length
-        val letters = trimmed.count { it.isLetter() }
+        // 4. Garbled symbols check: extremely low letter ratio without phone numbers/digits
         val letterRatio = letters.toDouble() / trimmed.length.coerceAtLeast(1)
-        if (letterRatio < 0.4 && trimmed.length > 10) {
+        if (letterRatio < 0.35 && trimmed.length in 10..40 && !trimmed.any { it.isDigit() }) {
             return true
         }
 

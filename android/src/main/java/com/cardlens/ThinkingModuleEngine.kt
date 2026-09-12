@@ -91,21 +91,26 @@ object ThinkingModuleEngine {
     }
 
     /**
-     * Format prompt for structured extraction.
+     * Format prompt for structured extraction with rigorous accuracy and field disambiguation rules.
      */
     fun buildExtractionPrompt(rawText: String): String {
         return """
-You are an expert business card parser. Extract structured information from the following OCR text into valid JSON only.
+You are an expert on-device document intelligence assistant specializing in business card entity extraction. Extract structured information from the following OCR text into valid JSON only.
 
-Rules:
-1. "companyName": Name of the company, store, brand or establishment (e.g. "Cakes Inn", "Bharat Sports").
-2. "tagline": Business category or description of services (e.g. "Whole Seller & Retailer of Sports Goods", "सेल्स सर्व्हिस अँड स्पेअर्स").
-3. "slogan": Inspirational quote or slogan (e.g. "एक नई सोच जो आपकी जिंदगी बदल दे......").
-4. "contactPersons": List of people with their role/designation. If the card is a retail brand without individual person names, return []. Do NOT extract building or landmark names (e.g. apartments, chambers, plazas, complexes) as persons.
-5. "phoneNumbers": List of phone numbers with label (Mobile, Office, Residence, WhatsApp, or branch location).
-6. "addresses": List of physical addresses. If multiple store branch locations are listed (e.g. separated by '|' and phone numbers), extract each store branch location separately into this list without the trailing phone numbers.
-7. "pincode": 6-digit postal code.
-8. "gstin": 15-character GSTIN tax number if present.
+CRITICAL DISAMBIGUATION & ACCURACY RULES:
+1. "companyName": Official commercial business, company, enterprise, or corporate brand name (e.g. "OM INDUSTRIES", "Tata Consultancy Services", "Bharat Sports", "Cakes Inn").
+   - NEGATIVE CONSTRAINT: NEVER extract product catalogs, manufactured goods, or services (e.g. "MCB Box, Fan Box, Modular Box", "Xerox, Printing, Binding") as companyName!
+   - NEGATIVE CONSTRAINT: NEVER extract the owner, manager, or contact person's name (e.g. "Anil Mittal") as companyName!
+2. "providedServices": Array of products, manufactured items, offerings, or services listed on the card (e.g. ["MCB Box", "Junction Box", "Fan Box", "Modular Box", "Concealed Box"]). Strip trailing "etc.", "and more", or ellipses.
+3. "tagline": Business description, specialty, or category (e.g. "Switchgears & Electricals", "Whole Seller & Retailer of Sports Goods").
+4. "slogan": Inspirational quote or motto if present.
+5. "contactPersons": Array of human individuals [{"name": "Anil Mittal", "role": null}]. Set "role" to professional title (e.g. "Director", "Managing Partner", "Proprietor") or null. NEVER extract landmarks, roads, colonies, or products as persons.
+6. "phoneNumbers": List of clean 10-digit mobile numbers or landline numbers (with optional label object {"number": "9999999999", "label": "Mobile"}).
+7. "emails": List of valid email addresses. Heal OCR scanning errors (e.g. "@" misread as "fd", "cl", "(a)", or "8" before domains like "xyz.com" or "gmail.com"). NEVER classify an email as a website.
+8. "websites": List of clean website domains or URLs (e.g. "www.example.com", "example.com"). Must NOT contain "@".
+9. "addresses": List of physical street addresses without merged phone numbers or emails. Restore clipped prefixes (e.g. "Mohan Nagar" not "ohan Nagar").
+10. "pincode": 6-digit postal code if present.
+11. "gstin": 15-character statutory GST tax number if present.
 
 OCR Text:
 $rawText
@@ -115,6 +120,7 @@ Respond with valid JSON only:
   "companyName": null,
   "tagline": null,
   "slogan": null,
+  "providedServices": [],
   "contactPersons": [],
   "phoneNumbers": [],
   "emails": [],
@@ -173,6 +179,7 @@ Respond with valid JSON only:
             "JEWELLERS", "CLOTHING", "FASHION", "SAREE", "OPTICAL", "CLINIC", "DENTAL", "LAB",
             "SALON", "SPA", "FITNESS", "GYM", "TRAVELS", "AUTO", "ELECTRONICS",
             "TELECOM", "COMMUNICATIONS", "COMMUNICATION", "CONSULTANCY", "ASTROLOGICAL", "ASTROLOGY",
+            "SWITCHGEARS", "SWITCHGEAR", "ELECTRICALS", "ELECTRICAL", "LIGHTING", "POWER",
             // Devanagari business indicators
             "मोटर्स", "साडी", "फॅशन", "मार्केटींग", "मार्केटिंग", "प्रा. लि.", "प्रा.लि.", "सेल्स", "एंटरप्रायझेस", "ट्रेडर्स", "उद्योग",
             "फर्निचर", "इलेक्ट्रॉनिक्स", "इलेक्ट्रॉनिक", "स्टील", "स्टिल", "सोफा", "भांडी", "वस्त्रनिकेतन", "साडी सेंटर"
@@ -186,6 +193,7 @@ Respond with valid JSON only:
             !line.contains("http") &&
             !line.contains("www.") &&
             FieldExtractor.extractPhoneNumbers(line).isEmpty() &&
+            !CardLayoutParser.looksLikeProductOrServiceList(line) &&
             !line.lowercase().contains("whole seller") &&
             !line.lowercase().contains("wholesaler") &&
             !line.lowercase().contains("retailer") &&
@@ -482,6 +490,7 @@ Respond with valid JSON only:
             companyName = companyName,
             tagline = tagline,
             slogan = slogan,
+            providedServices = baseCard.providedServices,
             contactPersons = persons,
             phoneNumbers = if (allPhones.isNotEmpty()) allPhones else baseCard.phoneNumbers,
             labeledPhones = if (labeledPhones.isNotEmpty()) labeledPhones else baseCard.labeledPhones,
@@ -577,6 +586,15 @@ Respond with valid JSON only:
                 }
             }
 
+            val providedServices = mutableListOf<String>()
+            val servicesArr = obj.optJSONArray("providedServices") ?: JSONArray()
+            for (i in 0 until servicesArr.length()) {
+                val s = servicesArr.optString(i, "").trim()
+                if (s.isNotBlank() && s != "null") {
+                    providedServices.add(s)
+                }
+            }
+
             val pincode = obj.optString("pincode", "").filter { it.isDigit() }.takeIf { it.length == 6 }
             val gstin = obj.optString("gstin", "").uppercase().takeIf { it.length == 15 }
 
@@ -584,6 +602,7 @@ Respond with valid JSON only:
                 companyName = companyName,
                 tagline = tagline,
                 slogan = slogan,
+                providedServices = if (providedServices.isNotEmpty()) providedServices else emptyList(),
                 contactPersons = contactPersons,
                 phoneNumbers = phoneNumbers.distinct(),
                 labeledPhones = labeledPhones,

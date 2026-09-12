@@ -142,6 +142,7 @@ export interface BusinessCard {
   companyName?: string;
   tagline?: string;
   slogan?: string;
+  providedServices?: string[];
   contactPersons: { name: string; role?: string }[];
   phoneNumbers: string[];
   labeledPhones?: LabeledPhone[];

@@ -19,6 +19,14 @@ import java.io.File
  */
 object ThinkingModuleEngine {
 
+    private val ADDRESS_ANCHOR_REGEX = Regex("(?i)\\b(?:shop[\\s.lno]+[0-9a-zA-Z]+|plot[\\s.no]+[0-9a-zA-Z]+|office|flat|building|bldg|floor|ward|gala|opp(?:osite)?|near|behind|road|rd|marg|nagar|chowk|square|sqsre|colony|sector|phase|appartment|apartment|complex|chambers|plaza|bazaar|market|ऑफीस|पत्ता|दुकान|प्लॉट)\\b")
+    private val PIPE_BRANCH_STRIP_REGEX = Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}.*$""")
+    private val PIPE_BRANCH_CHECK_REGEX = Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}""")
+    private val EMAIL_STRIP_REGEX1 = Regex("(?i)(?:email|e-mail|mail|fnol)?[:\\s.-]*[a-zA-Z0-9._%+\\-]+[@8](?:gmail|gnal|[a-zA-Z0-9.\\-]+)[\\s.]*(?:com|in|org)")
+    private val EMAIL_STRIP_REGEX2 = Regex("(?i)\\b(?:email|e-mail|mail|fnol)[^,;]*")
+    private val DOMAIN_STRIP_REGEX = Regex("(?i)\\b[a-zA-Z0-9.-]+\\.(?:com|in|org|net|co)\\b")
+    private val BRANCH_MATCH_REGEX = Regex("""(?:^|[,;]\s*|\b)([A-Za-z0-9\s]{3,35})\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?([6-9]\d{4}[\s.-]?\d{5})""")
+
     /**
      * Downloads an on-device model file (.task or .bin) with streaming chunked progress.
      * Pass an optional [authToken] Bearer string for HuggingFace gated models.
@@ -165,7 +173,10 @@ Respond with valid JSON only:
     fun refineCard(rawText: String): BusinessCard = refineWithSemanticReasoning(rawText)
 
     fun refineWithSemanticReasoning(rawText: String): BusinessCard {
+        val t0 = System.currentTimeMillis()
         val baseCard = CardScannerEngine.assembleBusinessCard(rawText, emptyList())
+        val t1 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "  -> assembleBusinessCard took ${t1 - t0}ms")
         val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() }
 
         // 1. Company Name Entity Reasoning:
@@ -199,9 +210,7 @@ Respond with valid JSON only:
             !line.lowercase().contains("retailer") &&
             !line.lowercase().contains("complete solution") &&
             !line.lowercase().contains("आमच्याकडे") &&
-            !CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { kw ->
-                Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])").containsMatchIn(line)
-            } &&
+            !CardLayoutParser.matchesLocationKeyword(line) &&
             line.length in 4..55
         }
 
@@ -215,9 +224,7 @@ Respond with valid JSON only:
                     FieldExtractor.extractPhoneNumbers(prevLine).isEmpty() &&
                     FieldExtractor.extractGstin(prevLine).isEmpty() &&
                     !CardLayoutParser.isReligiousInvocation(prevLine) &&
-                    !CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { kw ->
-                        Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])").containsMatchIn(prevLine)
-                    } &&
+                    !CardLayoutParser.matchesLocationKeyword(prevLine) &&
                     !NON_PERSON_KEYWORDS.any { prevLine.lowercase().contains(it) } &&
                     baseCard.contactPersons.none { it.name.equals(prevLine, ignoreCase = true) }) {
                     companyName = "$prevLine $exactCompanyLine"
@@ -324,9 +331,7 @@ Respond with valid JSON only:
             if (name.matches(Regex("(?i)^AV[YI]AZ\\s+BHAI$"))) name = "AYYAZ BHAI"
             val lower = name.lowercase()
             val isProduct = NON_PERSON_KEYWORDS.any { lower.contains(it) }
-            val isLocation = CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { kw ->
-                Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])").containsMatchIn(lower)
-            }
+            val isLocation = CardLayoutParser.matchesLocationKeyword(lower)
             if (!isProduct && !isLocation && persons.none { it.name.equals(name, ignoreCase = true) }) {
                 persons.add(ContactPerson(name, p.role))
             }
@@ -347,9 +352,7 @@ Respond with valid JSON only:
                 !CardLayoutParser.isReligiousInvocation(line) &&
                 !businessTypes.any { line.uppercase().contains(it) } &&
                 !NON_PERSON_KEYWORDS.any { kw -> line.lowercase().contains(kw) } &&
-                !CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { kw ->
-                    Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])").containsMatchIn(line)
-                }) {
+                !CardLayoutParser.matchesLocationKeyword(line)) {
                 if (words.all { w -> w.all { it.isLetter() || it in '\u0900'..'\u097F' || it == '.' } }) {
                     if (persons.none { it.name.equals(line, ignoreCase = true) }) {
                         persons.add(ContactPerson(line, null))
@@ -366,16 +369,15 @@ Respond with valid JSON only:
         }
 
         val refinedAddresses = mutableListOf<String>()
-        val addressAnchorRegex = Regex("(?i)\\b(?:shop[\\s.lno]+[0-9a-zA-Z]+|plot[\\s.no]+[0-9a-zA-Z]+|office|flat|building|bldg|floor|ward|gala|opp(?:osite)?|near|behind|road|rd|marg|nagar|chowk|square|sqsre|colony|sector|phase|appartment|apartment|complex|chambers|plaza|bazaar|market|ऑफीस|पत्ता|दुकान|प्लॉट)\\b")
 
         baseCard.addressLines.forEach { addr ->
             var cleanedAddr = addr
 
             // Strip trailing pipe/slash-separated branch phone: e.g. " | 95270 00045"
-            cleanedAddr = cleanedAddr.replace(Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}.*$"""), "").trim()
+            cleanedAddr = cleanedAddr.replace(PIPE_BRANCH_STRIP_REGEX, "").trim()
 
             // A. If address contains leading company tokens (e.g. "BHARAVT, SPORTS, "), slice from address anchor
-            val anchorMatch = addressAnchorRegex.find(cleanedAddr)
+            val anchorMatch = ADDRESS_ANCHOR_REGEX.find(cleanedAddr)
             if (anchorMatch != null && anchorMatch.range.first > 0) {
                 val prefix = cleanedAddr.substring(0, anchorMatch.range.first)
                 if (prefix.contains("BHARA", ignoreCase = true) || prefix.contains("SPORT", ignoreCase = true) ||
@@ -385,9 +387,9 @@ Respond with valid JSON only:
             }
 
             // B. Strip embedded/corrupted emails or web fragments
-            cleanedAddr = cleanedAddr.replace(Regex("(?i)(?:email|e-mail|mail|fnol)?[:\\s.-]*[a-zA-Z0-9._%+\\-]+[@8](?:gmail|gnal|[a-zA-Z0-9.\\-]+)[\\s.]*(?:com|in|org)"), "").trim()
-            cleanedAddr = cleanedAddr.replace(Regex("(?i)\\b(?:email|e-mail|mail|fnol)[^,;]*"), "").trim()
-            cleanedAddr = cleanedAddr.replace(Regex("(?i)\\b[a-zA-Z0-9.-]+\\.(?:com|in|org|net|co)\\b"), "").trim()
+            cleanedAddr = cleanedAddr.replace(EMAIL_STRIP_REGEX1, "").trim()
+            cleanedAddr = cleanedAddr.replace(EMAIL_STRIP_REGEX2, "").trim()
+            cleanedAddr = cleanedAddr.replace(DOMAIN_STRIP_REGEX, "").trim()
 
             // C. Heal common Indian address OCR noise
             cleanedAddr = cleanedAddr
@@ -420,11 +422,8 @@ Respond with valid JSON only:
 
         // D. Also scan lines directly for multi-branch addresses or lines with location keywords
         lines.forEach { line ->
-            val hasLocation = CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { kw ->
-                val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
-                Regex(pattern).containsMatchIn(line)
-            }
-            val hasPipeBranch = Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}""").containsMatchIn(line)
+            val hasLocation = CardLayoutParser.matchesLocationKeyword(line)
+            val hasPipeBranch = PIPE_BRANCH_CHECK_REGEX.containsMatchIn(line)
 
             if ((hasLocation || hasPipeBranch) &&
                 line != companyName && line != tagline && line != slogan &&
@@ -435,8 +434,8 @@ Respond with valid JSON only:
                 !line.lowercase().startsWith("cakesinn") &&
                 !line.lowercase().contains("cakes inn")) {
 
-                var cleanLine = line.replace(Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}.*$"""), "").trim()
-                cleanLine = cleanLine.replace(Regex("(?i)(?:email|e-mail|mail|fnol)?[:\\s.-]*[a-zA-Z0-9._%+\\-]+[@8](?:gmail|gnal|[a-zA-Z0-9.\\-]+)[\\s.]*(?:com|in|org)"), "").trim()
+                var cleanLine = line.replace(PIPE_BRANCH_STRIP_REGEX, "").trim()
+                cleanLine = cleanLine.replace(EMAIL_STRIP_REGEX1, "").trim()
                 cleanLine = cleanLine.trim(',', ' ', '-', '.', '|', '/')
 
                 if (cleanLine.length >= 8 &&
@@ -470,7 +469,7 @@ Respond with valid JSON only:
 
         // Also extract any pipe-delimited branch phones with their location labels
         lines.forEach { line ->
-            val branchMatch = Regex("""(?:^|[,;]\s*|\b)([A-Za-z0-9\s]{3,35})\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?([6-9]\d{4}[\s.-]?\d{5})""").find(line)
+            val branchMatch = BRANCH_MATCH_REGEX.find(line)
             if (branchMatch != null) {
                 val label = branchMatch.groupValues[1].trim()
                 val rawDigits = branchMatch.groupValues[2].filter { it.isDigit() }.takeLast(10)

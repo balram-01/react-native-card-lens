@@ -128,7 +128,7 @@ object BillScannerEngine {
         blocks: List<RawBlock>
     ): BillDocument {
         val documentType = extractDocumentType(rawText)
-        val issuerName = extractIssuerName(blocks)
+        val issuerName = extractIssuerName(blocks, rawText)
         val invoiceNumber = extractInvoiceNumber(rawText)
         val invoiceDate = extractInvoiceDate(rawText)
         val dueDate = extractDueDate(rawText)
@@ -385,27 +385,42 @@ object BillScannerEngine {
         return DOC_TYPES.firstOrNull { upper.contains(it) }
     }
 
-    fun extractIssuerName(blocks: List<RawBlock>): String? {
-        if (blocks.isEmpty()) return null
-        val minY = blocks.minOf { it.boundingBox.top }
-        val maxY = blocks.maxOf { it.boundingBox.bottom }
-        val topQuarter = minY + (maxY - minY) * 0.35
+    fun extractIssuerName(blocks: List<RawBlock>, rawText: String = ""): String? {
+        if (blocks.isNotEmpty()) {
+            val minY = blocks.minOf { it.boundingBox.top }
+            val maxY = blocks.maxOf { it.boundingBox.bottom }
+            val topQuarter = minY + (maxY - minY) * 0.35
 
-        val topBlocks = blocks.filter { it.boundingBox.top <= topQuarter && it.text.isNotBlank() }
-        if (topBlocks.isEmpty()) return null
+            val topBlocks = blocks.filter { it.boundingBox.top <= topQuarter && it.text.isNotBlank() }
+            if (topBlocks.isNotEmpty()) {
+                val candidate = topBlocks
+                    .filter { block ->
+                        val upper = block.text.uppercase()
+                        !DOC_TYPES.any { upper.contains(it) } &&
+                        !upper.contains("INVOICE") &&
+                        !upper.contains("PHONE") &&
+                        !upper.contains("EMAIL") &&
+                        !upper.contains("GSTIN")
+                    }
+                    .maxByOrNull { it.boundingBox.height }
 
-        val candidate = topBlocks
-            .filter { block ->
-                val upper = block.text.uppercase()
-                !DOC_TYPES.any { upper.contains(it) } &&
-                !upper.contains("INVOICE") &&
-                !upper.contains("PHONE") &&
-                !upper.contains("EMAIL") &&
-                !upper.contains("GSTIN")
+                val name = candidate?.lines?.firstOrNull()?.text?.trim()
+                if (!name.isNullOrBlank()) return name
             }
-            .maxByOrNull { it.boundingBox.height }
+        }
 
-        return candidate?.lines?.firstOrNull()?.text?.trim()
+        // Fallback to first non-empty line of rawText that isn't a doc type or invoice header
+        val firstLine = rawText.lines().firstOrNull { line ->
+            val clean = line.trim()
+            val upper = clean.uppercase()
+            clean.isNotBlank() &&
+            !DOC_TYPES.any { upper.contains(it) } &&
+            !upper.startsWith("INVOICE") &&
+            !upper.startsWith("BILL") &&
+            !clean.contains("@") &&
+            !clean.contains("www.")
+        }
+        return firstLine?.trim()
     }
 
     fun extractInvoiceNumber(rawText: String): String? {

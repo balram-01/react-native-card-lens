@@ -152,18 +152,22 @@ object CardScannerEngine {
         blocks: List<RawBlock>,
         qrCodeData: String? = null
     ): BusinessCard {
-        // 1. Run Phase 2 Regex Field Extractors
+        val t0 = System.currentTimeMillis()
         val contactFields = FieldExtractor.extractContactFields(rawText)
+        val t1 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "    -> extractContactFields took ${t1 - t0}ms")
 
-        // 2. Synthesize blocks from rawText if blocks list is empty (e.g. from plain text / Thinking Module)
         val effectiveBlocks = if (blocks.isEmpty() && rawText.isNotBlank()) {
             synthesizeBlocksFromText(rawText)
         } else {
             blocks
         }
+        val t2 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "    -> synthesizeBlocks took ${t2 - t1}ms")
 
-        // 3. Run Phase 3 Layout Heuristics
         val layout = CardLayoutParser.parseLayout(effectiveBlocks)
+        val t3 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "    -> parseLayout took ${t3 - t2}ms")
 
         // 3. Merge into BusinessCard
         return BusinessCard(

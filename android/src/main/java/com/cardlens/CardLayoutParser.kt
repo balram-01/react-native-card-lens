@@ -353,19 +353,26 @@ object CardLayoutParser {
      * For shorter indicators (< 5 chars), they must appear at the start or end of the text
      * to avoid matching common English words mid-sentence.
      */
+    private val COMPANY_INDICATORS_UPPER by lazy { COMPANY_INDICATORS.map { it.uppercase() }.toSet() }
+    private val COMPANY_MULTI_WORD by lazy { COMPANY_INDICATORS.filter { it.contains(" ") || it.contains(".") }.map { it.uppercase() } }
+
     fun hasCompanyIndicator(text: String): Boolean {
+        if (text.isBlank()) return false
         val upper = text.uppercase().trim()
-        return COMPANY_INDICATORS.any { kw ->
-            val kwUpper = kw.uppercase()
-            // For short/ambiguous keywords (<=5 chars), only match at end of text
-            if (kwUpper.length <= 5 && !kwUpper.contains(".")) {
-                // Must be at the end of the trimmed text or standalone
-                upper.endsWith(" $kwUpper") || upper == kwUpper || upper.endsWith(", $kwUpper")
-            } else {
-                val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
-                Regex(pattern).containsMatchIn(upper)
+        val tokens = upper.split(TOKEN_DELIMITERS)
+        for (token in tokens) {
+            if (token.isNotEmpty() && COMPANY_INDICATORS_UPPER.contains(token)) {
+                if (token.length <= 5 && !token.contains(".")) {
+                    if (upper.endsWith(" $token") || upper == token || upper.endsWith(", $token")) return true
+                } else {
+                    return true
+                }
             }
         }
+        for (mw in COMPANY_MULTI_WORD) {
+            if (upper.contains(mw)) return true
+        }
+        return false
     }
 
     fun isReligiousInvocation(text: String): Boolean {
@@ -380,17 +387,20 @@ object CardLayoutParser {
         }
 
         val lower = clean.lowercase()
-        return RELIGIOUS_INVOCATIONS.any { inv ->
+        for (inv in RELIGIOUS_INVOCATIONS) {
             if (inv.equals("om", ignoreCase = true) || inv == "ॐ" || inv == "ओम") {
-                // "om" is an invocation only if standalone, or very short phrase without commercial words
-                val words = lower.split(Regex("\\s+")).filter { it.isNotBlank() }
-                words.size <= 3 && (lower.matches(Regex("^(?:[|॥]*\\s*)?(?:om|ॐ|ओम)(?:\\s*[|॥]*)?$")) ||
-                    lower.contains("om namah") || lower.contains("om sai") || lower.contains("om shree ganesh"))
+                val words = lower.split(TOKEN_DELIMITERS).filter { it.isNotBlank() }
+                if (words.size <= 3 && (words.contains("om") || words.contains("ॐ") || words.contains("ओम") ||
+                    lower.contains("om namah") || lower.contains("om sai") || lower.contains("om shree ganesh"))) {
+                    return true
+                }
             } else {
-                val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(inv)}(?:$|[^\\p{L}\\p{N}])"
-                Regex(pattern).containsMatchIn(lower)
+                if (lower.contains(inv.lowercase())) {
+                    return true
+                }
             }
         }
+        return false
     }
 
     /**
@@ -704,12 +714,15 @@ object CardLayoutParser {
                lower.contains("yahoo") || lower.contains("outlook") || lower.contains("fnol")
     }
 
+    private val ADDR_PIPE_BRANCH_STRIP_REGEX = Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}.*$""")
+    private val ADDR_EMAIL_STRIP_REGEX = Regex("(?i)(?:email|e-mail|mail|fnol)?[:\\s.-]*[a-zA-Z0-9._%+\\-]+[@8](?:gmail|gnal|[a-zA-Z0-9.\\-]+)[\\s.]*(?:com|in|org)")
+    private val ADDR_WEB_STRIP_REGEX = Regex("(?i)\\b(?:www\\.|https?://)[^\\s,;)\\]]*")
+
     fun cleanAddressLine(text: String): String {
         var cleaned = text.replace(EMBEDDED_PHONE_PREFIX_REGEX, "").trim()
-        // Strip trailing pipe/slash branch phone: e.g. " | 95270 00045" or " / 95279 00033"
-        cleaned = cleaned.replace(Regex("""(?i)\s*[|/]\s*(?:(?:\+91|91|0)[\s.-]*)?[6-9]\d{4}[\s.-]?\d{5}.*$"""), "").trim()
-        cleaned = cleaned.replace(Regex("(?i)(?:email|e-mail|mail|fnol)?[:\\s.-]*[a-zA-Z0-9._%+\\-]+[@8](?:gmail|gnal|[a-zA-Z0-9.\\-]+)[\\s.]*(?:com|in|org)"), "").trim()
-        cleaned = cleaned.replace(Regex("(?i)\\b(?:www\\.|https?://)[^\\s,;)\\]]*"), "").trim()
+        cleaned = cleaned.replace(ADDR_PIPE_BRANCH_STRIP_REGEX, "").trim()
+        cleaned = cleaned.replace(ADDR_EMAIL_STRIP_REGEX, "").trim()
+        cleaned = cleaned.replace(ADDR_WEB_STRIP_REGEX, "").trim()
         return cleaned.trimEnd(',', '-', '.', '|', '/', ' ')
     }
 
@@ -942,13 +955,28 @@ object CardLayoutParser {
 
     // ── Private Validation Helpers ───────────────────────────────────────────
 
+    val ROLE_MULTI_WORD: List<String> by lazy {
+        DEFAULT_ROLE_KEYWORDS.filter { it.contains(" ") || it.contains("-") }.map { it.uppercase() }
+    }
+
     private fun matchRole(text: String, roleKeywords: Set<String>): String? {
         val clean = text.trim()
-        return roleKeywords.firstOrNull { kw ->
-            // Use Unicode letter/digit boundaries so English & Devanagari both match accurately
-            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
-            Regex(pattern).containsMatchIn(clean)
+        if (clean.isBlank()) return null
+        val upper = clean.uppercase()
+        val tokens = upper.split(TOKEN_DELIMITERS)
+        for (token in tokens) {
+            if (token.isNotEmpty()) {
+                val match = roleKeywords.firstOrNull { it.equals(token, ignoreCase = true) }
+                if (match != null) return match
+            }
         }
+        for (mw in ROLE_MULTI_WORD) {
+            if (upper.contains(mw)) {
+                val match = roleKeywords.firstOrNull { it.equals(mw, ignoreCase = true) }
+                if (match != null) return match
+            }
+        }
+        return null
     }
 
     private fun extractInlinePerson(text: String, roleKeywords: Set<String>): ContactPerson? {
@@ -1042,21 +1070,45 @@ object CardLayoutParser {
                FieldExtractor.extractGstin(text).isNotEmpty()
     }
 
-    private fun matchesLocationKeyword(text: String, locationKeywords: Set<String>): Boolean {
-        val clean = text.trim()
-        return locationKeywords.any { kw ->
-            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
-            Regex(pattern).containsMatchIn(clean)
-        }
+    val TOKEN_DELIMITERS: Regex = Regex("[\\s,;:.|/\\-–—\\[\\](){}\"'!?]+")
+
+    val MULTI_WORD_LOCATION_KEYWORDS: List<String> by lazy {
+        DEFAULT_LOCATION_KEYWORDS.filter { it.contains(" ") }.map { it.lowercase() }
     }
 
-    private fun looksLikePureAddress(text: String): Boolean {
-        val clean = text.trim()
-        val count = DEFAULT_LOCATION_KEYWORDS.count { kw ->
-            val pattern = "(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])"
-            Regex(pattern).containsMatchIn(clean)
+    fun matchesLocationKeyword(text: String, locationKeywords: Set<String> = DEFAULT_LOCATION_KEYWORDS): Boolean {
+        if (text.isBlank()) return false
+        val clean = text.trim().lowercase()
+        val tokens = clean.split(TOKEN_DELIMITERS)
+        for (token in tokens) {
+            if (token.isNotEmpty() && locationKeywords.contains(token)) {
+                return true
+            }
         }
-        return count >= 2 || FieldExtractor.extractPincodes(text).isNotEmpty()
+        for (kw in MULTI_WORD_LOCATION_KEYWORDS) {
+            if (clean.contains(kw)) return true
+        }
+        return false
+    }
+
+    fun countLocationKeywords(text: String, locationKeywords: Set<String> = DEFAULT_LOCATION_KEYWORDS): Int {
+        if (text.isBlank()) return 0
+        val clean = text.trim().lowercase()
+        var count = 0
+        val tokens = clean.split(TOKEN_DELIMITERS)
+        for (token in tokens) {
+            if (token.isNotEmpty() && locationKeywords.contains(token)) {
+                count++
+            }
+        }
+        for (kw in MULTI_WORD_LOCATION_KEYWORDS) {
+            if (clean.contains(kw)) count++
+        }
+        return count
+    }
+
+    fun looksLikePureAddress(text: String): Boolean {
+        return countLocationKeywords(text) >= 2 || FieldExtractor.extractPincodes(text).isNotEmpty()
     }
 
     private fun isNumeric(text: String): Boolean {

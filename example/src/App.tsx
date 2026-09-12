@@ -26,11 +26,10 @@ LogBox.ignoreAllLogs();
 
 import {
   startScanner,
-  extractContactFields,
-  extractCardLayout,
   scanDocument,
   refineCardWithThinkingModule,
   downloadThinkingModel,
+  BUSINESS_CARD_GBNF_GRAMMAR,
 } from 'react-native-card-lens';
 import type {
   RawOcrResult,
@@ -467,7 +466,7 @@ Return this JSON format:
         pageLimit: pageLimit,
         scannerMode: 'FULL',
         allowGalleryImport: true,
-        autoOcr: true,
+        autoOcr: false,
         script: 'auto',
       });
 
@@ -521,86 +520,104 @@ Return this JSON format:
       setOcrResult({ blocks: [], rawText: sample.text });
 
       if (sample.type === 'bill') {
-        // Parse sample as Bill
+        // Dynamically parse sample as Bill
         setDetectedType('bill');
-        const lines: LineItem[] = [
-          {
-            description: 'BREATHING TEST',
-            code: '94640',
-            billedAmount: 42.0,
-            patientResponsibility: 42.0,
-          },
-          {
-            description: 'OFFICE / OUTPATIENT VISIT',
-            code: '99213',
-            billedAmount: 210.0,
-            patientResponsibility: 210.0,
-          },
-        ];
-        const subtotal = lines.reduce(
-          (acc, l) => acc + (l.billedAmount || 0),
-          0
+        const rawLines = sample.text
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const issuerName = rawLines[0] || 'Unknown Issuer';
+
+        const invoiceNoMatch = sample.text.match(
+          /(?:Invoice\s*(?:#|No:?|Number:?)|Bill\s*(?:#|No:?))\s*([A-Za-z0-9-]+)/i
         );
+        const invoiceNumber = invoiceNoMatch ? invoiceNoMatch[1] : undefined;
+
+        const dateMatch = sample.text.match(
+          /(?:Date:?\s*)?(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})/i
+        );
+        const invoiceDate = dateMatch ? dateMatch[1] : undefined;
+
+        const subtotalMatch = sample.text.match(
+          /Subtotal:?\s*[$₹€£]?\s*([\d,]+\.?\d*)/i
+        );
+        const subtotal = subtotalMatch
+          ? parseFloat(subtotalMatch[1]!.replace(/,/g, ''))
+          : undefined;
+
+        const totalDueMatch = sample.text.match(
+          /(?:Total\s*(?:Due|Amount)?:?|Amount\s*Due:?)\s*[$₹€£]?\s*([\d,]+\.?\d*)/i
+        );
+        const amountDue = totalDueMatch
+          ? parseFloat(totalDueMatch[1]!.replace(/,/g, ''))
+          : subtotal;
+
+        // Dynamic Line Items Extraction
+        const lines: LineItem[] = [];
+        for (const line of rawLines) {
+          if (
+            line.match(
+              /Subtotal|Total|Invoice|Date|Patient|Item|Description|Rate|Price|Amount|CGST|SGST/i
+            )
+          )
+            continue;
+          const match = line.match(
+            /^(.+?)\s+(\d+)\s+[$₹€£]?([\d,]+\.?\d*)\s+[$₹€£]?([\d,]+\.?\d*)$/
+          );
+          if (match) {
+            lines.push({
+              description: match[1]!.trim(),
+              code: match[2],
+              billedAmount: parseFloat(match[4]!.replace(/,/g, '')),
+              patientResponsibility: parseFloat(match[4]!.replace(/,/g, '')),
+            });
+          }
+        }
+
         const bill: BillDocument = {
-          documentType: 'Medical Claim / Invoice',
-          issuerName: 'Highmark Hospital',
-          invoiceNumber: '22681147071',
-          invoiceDate: '12/04/2024',
+          documentType: sample.title.includes('Receipt')
+            ? 'Receipt'
+            : 'Invoice / Bill',
+          issuerName,
+          invoiceNumber,
+          invoiceDate,
           lineItems: lines,
-          subtotal,
-          amountDue: subtotal,
+          subtotal:
+            subtotal ||
+            lines.reduce((acc, l) => acc + (l.billedAmount || 0), 0),
+          amountDue: amountDue || subtotal,
           rawText: sample.text,
         };
         setBillDocument(bill);
         setStatusMessage(
-          `✅ Auto-Detected: Invoice / Bill (${bill.lineItems.length} items)`
+          `✅ Auto-Detected: ${bill.documentType} (${bill.lineItems.length} items)`
         );
       } else {
-        // Parse sample as Card
+        // Parse sample as Card using Native Thinking / Semantic Reasoner
+        console.log(
+          '[CardLensTest] Starting sample card refinement:',
+          sample.title
+        );
         setDetectedType('card');
-        const [contacts, layout] = await Promise.all([
-          extractContactFields(sample.text),
-          extractCardLayout({
-            rawText: sample.text,
-            blocks: sample.text.split('\n\n').map((para, pIdx) => ({
-              text: para,
-              boundingBox: {
-                left: 50,
-                top: pIdx * 100,
-                right: 400,
-                bottom: pIdx * 100 + 80,
-              },
-              lines: para.split('\n').map((l, lIdx) => ({
-                text: l,
-                boundingBox: {
-                  left: 50,
-                  top: pIdx * 100 + lIdx * 20,
-                  right: 400,
-                  bottom: pIdx * 100 + lIdx * 20 + 18,
-                },
-                elements: [],
-              })),
-            })),
-          }),
-        ]);
-
-        const card: BusinessCard = normalizeBusinessCard({
-          companyName: layout.companyName,
-          tagline: layout.tagline,
-          contactPersons: layout.contactPersons,
-          phoneNumbers: contacts.phoneNumbers,
-          emails: contacts.emails,
-          websites: contacts.websites,
-          addressLines: layout.addressLines,
-          pincode: contacts.pincodes?.[0],
-          gstin: contacts.gstin?.[0],
-          rawText: sample.text,
-        });
-
-        setBusinessCard(card);
-        setStatusMessage('✅ Auto-Detected: Business Card');
+        try {
+          const refined = await refineCardWithThinkingModule(sample.text);
+          console.log(
+            '[CardLensTest] Refined successfully:',
+            JSON.stringify(refined)
+          );
+          const card: BusinessCard = normalizeBusinessCard(refined);
+          console.log('[CardLensTest] Normalized card:', JSON.stringify(card));
+          setBusinessCard(card);
+          setStatusMessage(
+            `✅ Auto-Detected: Business Card (${card.companyName || 'Card'})`
+          );
+        } catch (err: any) {
+          console.error('[CardLensTest] Refinement error:', err);
+          setError(err.message || String(err));
+        }
       }
     } catch (e: any) {
+      console.error('[CardLensTest] Top error:', e);
       setError(e.message || 'Failed to process sample');
     } finally {
       setLoading(false);
@@ -644,8 +661,9 @@ Return this JSON format:
           const prompt = buildExtractionPrompt(rawText);
           const result = await ctx.completion({
             prompt,
-            n_predict: 500,
+            n_predict: 250,
             temperature: 0.1,
+            grammar: BUSINESS_CARD_GBNF_GRAMMAR,
             stop: ['<|im_end|>', '</s>', '<|endoftext|>'],
           });
 

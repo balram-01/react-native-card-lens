@@ -31,6 +31,19 @@ object DocumentClassifier {
         "डायरेक्टर", "संचालक", "संस्थापक", "मालक", "प्रोप्राईटर"
     )
 
+    // Pre-compiled regex patterns (compiled once at startup, not on every document)
+    private val STRONG_BILL_PATTERNS = STRONG_BILL_KEYWORDS.map { kw ->
+        Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
+    }
+
+    private val GENERAL_BILL_PATTERNS = GENERAL_BILL_KEYWORDS.map { kw ->
+        Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
+    }
+
+    private val CARD_PATTERNS = CARD_KEYWORDS.map { kw ->
+        Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
+    }
+
     /**
      * Classifies document OCR text into "bill" or "card".
      */
@@ -39,24 +52,14 @@ object DocumentClassifier {
         val upper = rawText.uppercase()
 
         // 1. Check strong bill signals
-        val hasStrongBillKeyword = STRONG_BILL_KEYWORDS.any { kw ->
-            val regex = Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
-            regex.containsMatchIn(upper)
-        }
+        val hasStrongBillKeyword = STRONG_BILL_PATTERNS.any { it.containsMatchIn(upper) }
         if (hasStrongBillKeyword) {
             return "bill"
         }
 
         // 2. Score general billing keywords vs card keywords
-        val billScore = GENERAL_BILL_KEYWORDS.count { kw ->
-            val regex = Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
-            regex.containsMatchIn(upper)
-        }
-
-        val cardScore = CARD_KEYWORDS.count { kw ->
-            val regex = Regex("(?i)(?:^|[^\\p{L}\\p{N}])${Regex.escape(kw)}(?:$|[^\\p{L}\\p{N}])")
-            regex.containsMatchIn(upper)
-        }
+        val billScore = GENERAL_BILL_PATTERNS.count { it.containsMatchIn(upper) }
+        val cardScore = CARD_PATTERNS.count { it.containsMatchIn(upper) }
 
         return if (billScore >= 2 && billScore > cardScore) {
             "bill"

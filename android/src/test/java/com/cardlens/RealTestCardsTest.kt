@@ -701,5 +701,30 @@ class RealTestCardsTest {
         assertEquals("iscoswitchgears@xyz.com", parsed.emails[0])
         assertEquals("110028", parsed.pincode)
     }
+
+    @Test
+    fun `extracts fields from Tech Corp sample card`() {
+        val ocrText = """
+            Hemlata Jawanjal
+            CEO & FOUNDER
+            +91 7385067604
+            hemlata@hestensolutions.com
+            www.hestensolutions.com
+
+            32/1, R.M.S. Collony Durga Nagar Old Subhedar Layout Nagpur, India - 440024
+            336, Bos en Lommerweg, 1061 DJ, Amsterdam Netherland
+
+            Hesten solutions Pvt.Ltd
+        """.trimIndent()
+
+        val refined = ThinkingModuleEngine.refineCard(ocrText)
+        assertEquals("Hesten solutions Pvt.Ltd", refined.companyName)
+        assertTrue(refined.contactPersons.any { it.name.contains("Hemlata", ignoreCase = true) })
+        assertEquals("7385067604", refined.phoneNumbers.firstOrNull())
+        assertEquals("hemlata@hestensolutions.com", refined.emails.firstOrNull())
+        assertEquals("www.hestensolutions.com", refined.websites.firstOrNull())
+        assertEquals("440024", refined.pincode)
+        assertTrue(refined.addressLines.isNotEmpty())
+    }
 }
 

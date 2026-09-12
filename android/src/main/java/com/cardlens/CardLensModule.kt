@@ -12,6 +12,7 @@ import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
@@ -51,9 +52,20 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   // Dedicated background thread pool for all heavy image decodes, OCR processing, and spatial parsing
   private val backgroundExecutor: ExecutorService = Executors.newCachedThreadPool()
 
+  // Reusable detector clients to avoid repeated JNI/client allocation overhead
+  private val latinRecognizer by lazy {
+    TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+  }
+  private val qrBarcodeScanner by lazy {
+    val options = BarcodeScannerOptions.Builder()
+      .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+      .build()
+    BarcodeScanning.getClient(options)
+  }
+
   // State held during active scanner session
   private var pendingScanPromise: Promise? = null
-  private var pendingScanAutoOcr: Boolean = true
+  private var pendingScanAutoOcr: Boolean = false
   private var pendingScanScript: String = "latin"
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -86,7 +98,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
       val pageLimit = if (options.hasKey("pageLimit")) options.getInt("pageLimit") else 1
       val allowGallery = if (options.hasKey("allowGalleryImport")) options.getBoolean("allowGalleryImport") else true
       val scannerModeStr = if (options.hasKey("scannerMode")) options.getString("scannerMode") else "FULL"
-      pendingScanAutoOcr = if (options.hasKey("autoOcr")) options.getBoolean("autoOcr") else true
+      pendingScanAutoOcr = if (options.hasKey("autoOcr")) options.getBoolean("autoOcr") else false
       pendingScanScript = if (options.hasKey("script")) options.getString("script") ?: "auto" else "auto"
 
       val mode = when (scannerModeStr?.uppercase()) {
@@ -420,8 +432,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
 
   private fun scanBarcodeSafely(inputImage: InputImage, onResult: (String?) -> Unit) {
     try {
-      val barcodeScanner = BarcodeScanning.getClient()
-      barcodeScanner.process(inputImage)
+      qrBarcodeScanner.process(inputImage)
         .addOnSuccessListener(backgroundExecutor) { barcodes ->
           val qrBarcode = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE } ?: barcodes.firstOrNull()
           onResult(qrBarcode?.rawValue)
@@ -441,21 +452,49 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   ) {
     backgroundExecutor.execute {
       try {
-        // Load InputImage once from disk and share with all detectors
+        // Load InputImage once from disk and share with all detectors (capped to 2048px for fast processing)
         val inputImage = ImageLoader.fromUri(reactApplicationContext, imageUri)
-        val latinRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-        // 1. Run zero-download, pre-installed Latin recognizer first (< 200ms)
+        val lock = Any()
+        var qrCodeResult: String? = null
+        var isQrDone = false
+        var isOcrDone = false
+        var ocrData: Pair<String, List<RawBlock>>? = null
+        var reported = false
+
+        fun tryComplete() {
+          synchronized(lock) {
+            if (reported) return
+            if (isOcrDone && isQrDone) {
+              reported = true
+              val (text, blocks) = ocrData!!
+              onSuccess(PageOcrData(text, blocks, qrCodeResult))
+            }
+          }
+        }
+
+        // 1. Run QR barcode scanning in parallel (fast: ~30ms on constrained format)
+        scanBarcodeSafely(inputImage) { qr ->
+          synchronized(lock) {
+            qrCodeResult = qr
+            isQrDone = true
+            tryComplete()
+          }
+        }
+
+        // 2. Run zero-download, pre-installed Latin recognizer concurrently (< 150ms)
         latinRecognizer.process(inputImage)
           .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
             val latinText = latinVisionText.text
             val latinBlocks = toRawBlocks(latinVisionText)
 
             // If Latin pass produced sufficient text and has no Devanagari codepoints,
-            // return immediately in sub-second time without triggering slow model downloads.
+            // complete immediately in sub-second time without triggering slow model downloads.
             if (!ScriptDetector.shouldRerunWithDevanagari(latinText)) {
-              scanBarcodeSafely(inputImage) { qrCode ->
-                onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
+              synchronized(lock) {
+                ocrData = Pair(latinText, latinBlocks)
+                isOcrDone = true
+                tryComplete()
               }
             } else {
               // Hindi/Marathi or low-density card: attempt Devanagari recognizer
@@ -467,19 +506,24 @@ class CardLensModule(reactContext: ReactApplicationContext) :
                     val devBlocks = toRawBlocks(devVisionText)
                     val fusedBlocks = CardScannerEngine.fuseOcrBlocks(latinBlocks, devBlocks)
                     val fusedText = CardScannerEngine.fuseRawText(latinText, devText)
-                    scanBarcodeSafely(inputImage) { qrCode ->
-                      onSuccess(PageOcrData(fusedText, fusedBlocks, qrCode))
+                    synchronized(lock) {
+                      ocrData = Pair(fusedText, fusedBlocks)
+                      isOcrDone = true
+                      tryComplete()
                     }
                   }
                   .addOnFailureListener(backgroundExecutor) {
-                    // If Devanagari model download fails or times out, safely return Latin result
-                    scanBarcodeSafely(inputImage) { qrCode ->
-                      onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
+                    synchronized(lock) {
+                      ocrData = Pair(latinText, latinBlocks)
+                      isOcrDone = true
+                      tryComplete()
                     }
                   }
               } catch (e: Exception) {
-                scanBarcodeSafely(inputImage) { qrCode ->
-                  onSuccess(PageOcrData(latinText, latinBlocks, qrCode))
+                synchronized(lock) {
+                  ocrData = Pair(latinText, latinBlocks)
+                  isOcrDone = true
+                  tryComplete()
                 }
               }
             }
@@ -490,13 +534,27 @@ class CardLensModule(reactContext: ReactApplicationContext) :
               val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
               devanagariRecognizer.process(inputImage)
                 .addOnSuccessListener(backgroundExecutor) { devVisionText ->
-                  scanBarcodeSafely(inputImage) { qrCode ->
-                    onSuccess(PageOcrData(devVisionText.text, toRawBlocks(devVisionText), qrCode))
+                  synchronized(lock) {
+                    ocrData = Pair(devVisionText.text, toRawBlocks(devVisionText))
+                    isOcrDone = true
+                    tryComplete()
                   }
                 }
-                .addOnFailureListener(backgroundExecutor) { e -> onError(e) }
+                .addOnFailureListener(backgroundExecutor) { e ->
+                  synchronized(lock) {
+                    if (!reported) {
+                      reported = true
+                      onError(e)
+                    }
+                  }
+                }
             } catch (e: Exception) {
-              onError(latinError)
+              synchronized(lock) {
+                if (!reported) {
+                  reported = true
+                  onError(latinError)
+                }
+              }
             }
           }
       } catch (e: Exception) {
@@ -869,8 +927,14 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     // Semantic Thinking Reasoner — instant, zero-dependency, pure Kotlin
     backgroundExecutor.execute {
       try {
+        val t0 = System.currentTimeMillis()
         val refined = ThinkingModuleEngine.refineWithSemanticReasoning(rawText)
-        promise.resolve(refined.toWritableMap())
+        val t1 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "refineWithSemanticReasoning took ${t1 - t0}ms")
+        val map = refined.toWritableMap()
+        val t2 = System.currentTimeMillis()
+        android.util.Log.i("CardLensSpeed", "toWritableMap took ${t2 - t1}ms")
+        promise.resolve(map)
       } catch (e: Exception) {
         promise.reject("CARDLENS_THINKING_INFERENCE_ERROR", e.message, e)
       }

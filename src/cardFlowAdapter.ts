@@ -524,6 +524,11 @@ export interface ExtractCardFlowOptions extends CardFlowAdapterOptions {
    * for deeper entity and multi-branch address extraction. Default: false.
    */
   useThinkingModule?: boolean;
+  /**
+   * Whether to simulate artificial progress step delays (e.g. for UI demo pacing).
+   * Default: false (zero artificial delays for maximum on-device extraction speed).
+   */
+  simulateDelays?: boolean;
 }
 
 /**
@@ -825,11 +830,16 @@ export async function startAsyncExtraction(
   inFlightJobs.set(jobId, record);
   notifyJobProgress(record);
 
+  const delay = (ms: number) =>
+    options.simulateDelays
+      ? new Promise<void>((resolve) => setTimeout(resolve, ms))
+      : Promise.resolve();
+
   // Run pipeline in background
   (async () => {
     try {
       // Step 1: Preprocess (18%)
-      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      await delay(200);
       if (record.aborted) return;
 
       record.currentNode = 'classify';
@@ -839,7 +849,7 @@ export async function startAsyncExtraction(
       notifyJobProgress(record);
 
       // Step 2: Extract (62%)
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      await delay(250);
       if (record.aborted) return;
 
       record.currentNode = 'extract_business_card';
@@ -894,7 +904,7 @@ export async function startAsyncExtraction(
       record.updatedAt = new Date().toISOString();
       notifyJobProgress(record);
 
-      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      await delay(150);
       if (record.aborted) return;
 
       const cardFlowRes = toCardFlowApiResponse(card, { ...options, jobId });
@@ -907,7 +917,7 @@ export async function startAsyncExtraction(
         record.progressPercentage = 92;
         record.updatedAt = new Date().toISOString();
         notifyJobProgress(record);
-        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+        await delay(150);
       }
 
       record.currentNode = 'finalize';
@@ -916,7 +926,7 @@ export async function startAsyncExtraction(
       record.updatedAt = new Date().toISOString();
       notifyJobProgress(record);
 
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await delay(100);
 
       // Terminal state
       record.status = cardData.needsHumanReview ? 'needs_review' : 'completed';

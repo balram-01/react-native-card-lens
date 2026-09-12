@@ -17,48 +17,78 @@ ws ::= [ \\t\\n\\r]*
 /**
  * Registry of free, open-weights on-device models that run 100% locally.
  */
+import { downloadThinkingModel } from './ThinkingModule';
+
+/**
+ * Registry of free, open-weights on-device models that run 100% locally.
+ */
 export interface LocalModelDescriptor {
   id: string;
   name: string;
+  tag: string;
   sizeMB: number;
   downloadUrl: string;
+  filename: string;
   architecture: string;
   description: string;
 }
 
 export const AVAILABLE_LOCAL_MODELS: LocalModelDescriptor[] = [
   {
-    id: 'smollm2-360m',
-    name: 'SmolLM2-360M-Instruct (Ultra-Lightweight)',
-    sizeMB: 229,
+    id: 'smollm2-360m-q4',
+    name: 'SmolLM2-360M Q4_K_M',
+    tag: 'Fastest (<1s)',
+    sizeMB: 231,
     downloadUrl:
-      'https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/main/smollm2-360m-instruct-q4_k_m.gguf',
+      'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf',
+    filename: 'SmolLM2-360M-Instruct-Q4_K_M.gguf',
     architecture: 'Llama (Q4_K_M)',
     description:
-      'Ultra-fast ~220 MB on-device model. Uses < 300MB RAM, runs at 80+ tokens/sec on mobile CPU/GPU.',
+      'Ultra-fast 231 MB model. Low RAM footprint. Instant on-device structured extraction.',
   },
   {
-    id: 'qwen2.5-0.5b',
-    name: 'Qwen2.5-0.5B-Instruct (Multilingual)',
-    sizeMB: 352,
+    id: 'qwen25-05b-q4',
+    name: 'Qwen2.5-0.5B Q4_K_M',
+    tag: 'Balanced',
+    sizeMB: 340,
     downloadUrl:
-      'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
+      'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
+    filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
     architecture: 'Qwen2 (Q4_K_M)',
     description:
-      'Multilingual ~350 MB on-device model. Strong reasoning for complex business roles and Devanagari cards.',
+      '340 MB model. Excellent instruction following, complex layout disambiguation, and multilingual cards.',
+  },
+  {
+    id: 'tinyllama-q4',
+    name: 'TinyLlama-1.1B Q4_K_M',
+    tag: 'High Quality',
+    sizeMB: 669,
+    downloadUrl:
+      'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    filename: 'tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    architecture: 'Llama (Q4_K_M)',
+    description:
+      '669 MB model. Best reasoning depth and multi-lingual card understanding.',
   },
 ];
 
 /**
- * Progress details during model download.
+ * Live download progress details for local models.
  */
 export interface ModelDownloadProgress {
-  progress: number; // 0.0 to 1.0
-  percentage: number; // 0 to 100
+  fileName: string;
+  modelId: string;
+  downloadedBytes: number;
+  totalBytes: number;
   downloadedMB: number;
   totalMB: number;
+  percentage: number; // 0 to 100
+  progress: number; // 0.0 to 1.0
   speedMBps?: number;
+  elapsedSeconds?: number;
+  estimatedRemainingSeconds?: number;
   status: 'idle' | 'downloading' | 'verifying' | 'completed' | 'error';
+  error?: string;
 }
 
 /**
@@ -72,8 +102,85 @@ export interface ModelStatus {
   modelName: string;
 }
 
-// In-memory registry tracking downloaded models on the device filesystem
+/**
+ * Result of querying remote model size headers prior to downloading.
+ */
+export interface RemoteModelSizeInfo {
+  totalBytes: number;
+  totalMB: number;
+  contentLengthHeader: string | null;
+  supportsRange: boolean;
+}
+
+// In-memory registry tracking downloaded models and active progress
 const downloadedModelRegistry: Record<string, string> = {};
+const activeDownloadProgressRegistry: Record<string, ModelDownloadProgress> =
+  {};
+const downloadProgressListeners: Set<
+  (progress: ModelDownloadProgress) => void
+> = new Set();
+
+/**
+ * Inquire the exact download size of a remote model file by inspecting
+ * HTTP headers via a lightweight HEAD request before starting the download.
+ *
+ * @param url         Public HTTPS URL to check.
+ * @param authToken   Optional Bearer token for gated HuggingFace models.
+ */
+export async function fetchRemoteModelSize(
+  url: string,
+  authToken?: string
+): Promise<RemoteModelSizeInfo> {
+  const headers: Record<string, string> = {};
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+  try {
+    const response = await fetch(url, {
+      method: 'HEAD',
+      headers,
+    });
+    const lengthStr = response.headers.get('content-length');
+    const bytes = lengthStr ? parseInt(lengthStr, 10) : 0;
+    const mb = bytes > 0 ? Math.round((bytes / (1024 * 1024)) * 100) / 100 : 0;
+    return {
+      totalBytes: bytes,
+      totalMB: mb,
+      contentLengthHeader: lengthStr,
+      supportsRange: response.headers.get('accept-ranges') === 'bytes',
+    };
+  } catch {
+    return {
+      totalBytes: 0,
+      totalMB: 0,
+      contentLengthHeader: null,
+      supportsRange: false,
+    };
+  }
+}
+
+/**
+ * Subscribe to realtime model download progress across the entire application.
+ * Returns an unsubscribe callback function.
+ */
+export function onModelDownloadProgress(
+  listener: (progress: ModelDownloadProgress) => void
+): () => void {
+  downloadProgressListeners.add(listener);
+  return () => {
+    downloadProgressListeners.delete(listener);
+  };
+}
+
+/**
+ * Query the latest recorded download progress for a model.
+ * Ideal for UI polling intervals or status checks.
+ */
+export function getModelDownloadProgress(
+  modelId: string
+): ModelDownloadProgress | null {
+  return activeDownloadProgressRegistry[modelId] ?? null;
+}
 
 /**
  * Check if the target local SLM is already downloaded and cached on disk.
@@ -92,77 +199,138 @@ export async function checkLocalModelStatus(
 }
 
 /**
- * Downloads the specified SLM model to local device storage with live progress updates.
+ * Downloads the specified SLM model to local device storage using the native
+ * chunked HTTP streaming downloader with real-time byte tracking, speed calculation,
+ * and percentage progress events.
  *
- * @param model       The model descriptor (defaults to SmolLM2-360M ~220MB).
- * @param onProgress  Callback invoked with download percentage and MB progress.
- * @param cancelSignal Object with `aborted: boolean` to cancel in-flight download.
+ * @param model       The model descriptor from `AVAILABLE_LOCAL_MODELS`.
+ * @param onProgress  Optional callback invoked with live percentage and MB progress.
+ * @param authToken   Optional Bearer token for gated models.
+ * @returns           Absolute local filesystem path to the downloaded model.
  */
 export async function downloadLocalModel(
   model: LocalModelDescriptor = AVAILABLE_LOCAL_MODELS[0]!,
   onProgress?: (progress: ModelDownloadProgress) => void,
-  cancelSignal?: { aborted: boolean }
+  authToken?: string
 ): Promise<{ localPath: string }> {
-  const totalMB = model.sizeMB;
-  const fileName = `${model.id}-instruct-q4_k_m.gguf`;
-  const localPath = `file:///data/user/0/cardlens.example/files/models/${fileName}`;
+  const startTime = Date.now();
+  let lastBytes = 0;
+  let lastTime = startTime;
 
-  onProgress?.({
-    progress: 0,
-    percentage: 0,
+  const initialProgress: ModelDownloadProgress = {
+    fileName: model.filename,
+    modelId: model.id,
+    downloadedBytes: 0,
+    totalBytes: model.sizeMB * 1024 * 1024,
     downloadedMB: 0,
-    totalMB,
-    speedMBps: 18.5,
-    status: 'downloading',
-  });
-
-  // Chunked progress simulation with realistic transfer pacing
-  const steps = 20;
-  const stepMB = totalMB / steps;
-
-  for (let i = 1; i <= steps; i++) {
-    if (cancelSignal?.aborted) {
-      onProgress?.({
-        progress: 0,
-        percentage: 0,
-        downloadedMB: 0,
-        totalMB,
-        status: 'error',
-      });
-      throw new Error('Model download was canceled by user.');
-    }
-
-    await new Promise((res) => setTimeout(res, 150));
-
-    const currentMB = Math.min(Math.round(i * stepMB), totalMB);
-    const progress = Number((currentMB / totalMB).toFixed(2));
-    const percentage = Math.min(Math.round(progress * 100), 100);
-
-    onProgress?.({
-      progress,
-      percentage,
-      downloadedMB: currentMB,
-      totalMB,
-      speedMBps: 15 + Math.round(Math.random() * 8),
-      status: i === steps ? 'verifying' : 'downloading',
-    });
-  }
-
-  // Verification step
-  await new Promise((res) => setTimeout(res, 300));
-
-  downloadedModelRegistry[model.id] = localPath;
-
-  onProgress?.({
-    progress: 1,
-    percentage: 100,
-    downloadedMB: totalMB,
-    totalMB,
+    totalMB: model.sizeMB,
+    percentage: 0,
+    progress: 0,
     speedMBps: 0,
-    status: 'completed',
-  });
+    status: 'downloading',
+  };
 
-  return { localPath };
+  activeDownloadProgressRegistry[model.id] = initialProgress;
+  onProgress?.(initialProgress);
+  downloadProgressListeners.forEach((fn) => fn(initialProgress));
+
+  try {
+    const localPath = await downloadThinkingModel(
+      model.downloadUrl,
+      model.filename,
+      (nativeProg) => {
+        const now = Date.now();
+        const timeDiffSec = (now - lastTime) / 1000;
+        const bytesDiff = nativeProg.downloadedBytes - lastBytes;
+
+        let speedMBps: number | undefined;
+        if (timeDiffSec >= 0.5 && bytesDiff > 0) {
+          speedMBps =
+            Math.round((bytesDiff / (1024 * 1024) / timeDiffSec) * 10) / 10;
+          lastBytes = nativeProg.downloadedBytes;
+          lastTime = now;
+        }
+
+        const elapsedSeconds = Math.round((now - startTime) / 1000);
+        const remainingBytes = Math.max(
+          0,
+          nativeProg.totalBytes - nativeProg.downloadedBytes
+        );
+        const estimatedRemainingSeconds =
+          speedMBps && speedMBps > 0
+            ? Math.round(remainingBytes / (speedMBps * 1024 * 1024))
+            : undefined;
+
+        const downloadedMB =
+          Math.round((nativeProg.downloadedBytes / (1024 * 1024)) * 10) / 10;
+        const totalMB =
+          Math.round((nativeProg.totalBytes / (1024 * 1024)) * 10) / 10;
+        const percentage = Math.round(nativeProg.percentage * 10) / 10;
+
+        const currentProg: ModelDownloadProgress = {
+          fileName: model.filename,
+          modelId: model.id,
+          downloadedBytes: nativeProg.downloadedBytes,
+          totalBytes: nativeProg.totalBytes,
+          downloadedMB,
+          totalMB,
+          percentage,
+          progress:
+            nativeProg.totalBytes > 0
+              ? nativeProg.downloadedBytes / nativeProg.totalBytes
+              : 0,
+          speedMBps,
+          elapsedSeconds,
+          estimatedRemainingSeconds,
+          status: percentage >= 100 ? 'verifying' : 'downloading',
+        };
+
+        activeDownloadProgressRegistry[model.id] = currentProg;
+        onProgress?.(currentProg);
+        downloadProgressListeners.forEach((fn) => fn(currentProg));
+      },
+      authToken
+    );
+
+    downloadedModelRegistry[model.id] = localPath;
+
+    const completedProg: ModelDownloadProgress = {
+      fileName: model.filename,
+      modelId: model.id,
+      downloadedBytes: model.sizeMB * 1024 * 1024,
+      totalBytes: model.sizeMB * 1024 * 1024,
+      downloadedMB: model.sizeMB,
+      totalMB: model.sizeMB,
+      percentage: 100,
+      progress: 1.0,
+      speedMBps: 0,
+      status: 'completed',
+    };
+
+    activeDownloadProgressRegistry[model.id] = completedProg;
+    onProgress?.(completedProg);
+    downloadProgressListeners.forEach((fn) => fn(completedProg));
+
+    return { localPath };
+  } catch (err: any) {
+    const errorProg: ModelDownloadProgress = {
+      fileName: model.filename,
+      modelId: model.id,
+      downloadedBytes: 0,
+      totalBytes: model.sizeMB * 1024 * 1024,
+      downloadedMB: 0,
+      totalMB: model.sizeMB,
+      percentage: 0,
+      progress: 0,
+      status: 'error',
+      error: err?.message || 'Download failed',
+    };
+
+    activeDownloadProgressRegistry[model.id] = errorProg;
+    onProgress?.(errorProg);
+    downloadProgressListeners.forEach((fn) => fn(errorProg));
+    throw err;
+  }
 }
 
 /**
@@ -172,6 +340,7 @@ export async function deleteLocalModel(
   model: LocalModelDescriptor = AVAILABLE_LOCAL_MODELS[0]!
 ): Promise<void> {
   delete downloadedModelRegistry[model.id];
+  delete activeDownloadProgressRegistry[model.id];
 }
 
 /**

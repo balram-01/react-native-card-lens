@@ -178,6 +178,121 @@ interface BillDocument {
 
 ---
 
+## CardFlowAI Integration (Seamless 1:1 Backend Replacement)
+
+If your existing application expects the extraction response contract specified in `existin_app_mehtods.md`, you can use `extractCardFlow` as a drop-in replacement for `POST /api/v1/extract`:
+
+```ts
+import { extractCardFlow, startCardFlowScanner } from 'react-native-card-lens';
+
+// 1. Direct drop-in extraction from an image URI or payload
+const response = await extractCardFlow('file:///data/.../card.jpg');
+
+if (response.success && response.data) {
+  // Matches exact CardFlowAI backend contract:
+  console.log(response.data.result.data.fullName);        // Primary cardholder name
+  console.log(response.data.result.data.companyName);     // Company / Business name
+  console.log(response.data.result.data.phonePrimary);    // Primary phone
+  console.log(response.data.result.data.contacts);        // Full structured contacts array
+  console.log(response.data.result.confidence);          // Field confidence scores
+  console.log(response.data.needsHumanReview);           // Confidence review flag
+}
+
+// 2. Launch Camera Scanner UI + return CardFlowAI response directly
+const { scanResult, cardFlowResponse } = await startCardFlowScanner();
+```
+
+### Thinking Module & Realtime Async Polling (existin_app_mehtods.md Lifecycle)
+
+When using the Thinking Module or emulating the backend queue workflow, you can trigger asynchronous extraction that emits exact progress states (`18% preprocess` -> `38% classify` -> `62% extract_business_card` -> `82% validate` -> `98% finalize` -> `100% completed`):
+
+```ts
+import {
+  startAsyncExtraction,
+  getJobStatus,
+  pollJobUntilComplete,
+  checkExtractionQuota,
+  extractCardFlowWithThinking,
+} from 'react-native-card-lens';
+
+// 1. Pre-scan Quota Check (matches GET /api/v1/cards/extract/check)
+const quota = await checkExtractionQuota();
+console.log('Unlimited on-device scans:', quota.data.isUnlimited); // true
+
+// 2. Start Async Job (matches HTTP 202 Accepted)
+const { data } = await startAsyncExtraction('file:///card.jpg', {
+  useThinkingModule: true,
+});
+console.log('Job ID:', data.jobId); // e.g. "163d5c3b-..."
+
+// 3. Poll Job Status (matches GET /api/v1/jobs/{jobId}/status)
+const status = getJobStatus(data.jobId);
+console.log(status.data.currentNode);         // "extract_business_card"
+console.log(status.data.currentStepMessage);  // "Running On-Device Thinking Module reasoning..."
+console.log(status.data.progressPercentage);  // 62
+
+// 4. Or use the automated polling helper:
+const finalResult = await pollJobUntilComplete(data.jobId, {
+  intervalMs: 1500,
+  onProgress: (stage) => {
+    console.log(`[${stage.progressPercentage}%] ${stage.currentStepMessage}`);
+  },
+});
+
+// 5. Or one-line high-level helper with live stage callback:
+const result = await extractCardFlowWithThinking('file:///card.jpg', (stage) => {
+  console.log(`UI Stage: ${stage.currentStepMessage} (${stage.progressPercentage}%)`);
+});
+```
+
+---
+
+## On-Device Local LLM Engine (Free GGUF Small Language Models)
+
+`react-native-card-lens` includes complete model management for 100% on-device open-weights SLMs (GGUF via llama.rn / llama.cpp):
+
+```ts
+import {
+  AVAILABLE_LOCAL_MODELS,
+  fetchRemoteModelSize,
+  downloadLocalModel,
+  checkLocalModelStatus,
+  deleteLocalModel,
+  onModelDownloadProgress,
+  refineCardWithThinkingModule,
+} from 'react-native-card-lens';
+
+// 1. Inspect Available Models
+AVAILABLE_LOCAL_MODELS.forEach((m) => {
+  console.log(`${m.name} (${m.sizeMB} MB) - ${m.tag}`);
+});
+// SmolLM2-360M Q4_K_M (231 MB) - Fastest (<1s)
+// Qwen2.5-0.5B Q4_K_M (340 MB) - Balanced (Multilingual)
+// TinyLlama-1.1B Q4_K_M (669 MB) - High Quality
+
+// 2. Query Exact Remote Download Size before downloading
+const remoteInfo = await fetchRemoteModelSize(AVAILABLE_LOCAL_MODELS[0].downloadUrl);
+console.log('Actual Server File Size:', remoteInfo.totalMB, 'MB');
+
+// 3. Download Model with Real-Time Streaming Progress, Speed (MB/s), & ETA
+const { localPath } = await downloadLocalModel(
+  AVAILABLE_LOCAL_MODELS[0],
+  (prog) => {
+    console.log(`Downloaded: ${prog.downloadedMB} / ${prog.totalMB} MB (${prog.percentage}%)`);
+    console.log(`Speed: ${prog.speedMBps} MB/s, ETA: ${prog.estimatedRemainingSeconds}s`);
+  }
+);
+
+// 4. Check If Cached on Disk
+const status = await checkLocalModelStatus(AVAILABLE_LOCAL_MODELS[0]);
+console.log('Is Cached Locally:', status.isDownloaded);
+
+// 5. Instant Zero-Setup Native Semantic Reasoner
+const refinedCard = await refineCardWithThinkingModule(rawOcrText);
+```
+
+---
+
 ## Accuracy Limitations & Best Practices
 
 > [!IMPORTANT]

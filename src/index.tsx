@@ -328,10 +328,45 @@ export {
   checkLocalModelStatus,
   downloadLocalModel,
   deleteLocalModel,
+  fetchRemoteModelSize,
+  onModelDownloadProgress,
+  getModelDownloadProgress,
 } from './LocalCardLLM';
 export type {
   LocalLLMOptions,
   LocalModelDescriptor,
   ModelDownloadProgress,
   ModelStatus,
+  RemoteModelSizeInfo,
 } from './LocalCardLLM';
+
+// ─── CardFlowAI Backend Drop-in Compatibility & Polling Pipeline ───────────
+export {
+  toCardFlowApiResponse,
+  extractCardFlow,
+  startCardFlowScanner,
+  startAsyncExtraction,
+  getJobStatus,
+  onExtractionJobProgress,
+  pollJobUntilComplete,
+  cancelExtractionJob,
+  checkExtractionQuota,
+  extractCardFlowWithThinking,
+} from './cardFlowAdapter';
+export type {
+  CardFlowApiResponse,
+  CardFlowExtractionData,
+  CardFlowResult,
+  CardFlowCardData,
+  CardFlowContact,
+  CardFlowContactPhone,
+  CardFlowConfidence,
+  CardFlowAuditNode,
+  CardFlowExtractionMeta,
+  CardFlowExtractPayload,
+  CardFlowAdapterOptions,
+  ExtractCardFlowOptions,
+  CardFlowNode,
+  CardFlowJobProcessingData,
+  CardFlowQuotaData,
+} from './cardFlowAdapter';

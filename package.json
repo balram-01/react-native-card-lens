@@ -40,7 +40,10 @@
     "test": "jest",
     "release": "release-it --only-version",
     "web": "vite",
-    "build:web": "vite build"
+    "build:web": "vite build",
+    "build:example": "npm run --prefix example build:android",
+    "build:example:release": "npm run --prefix example build-release",
+    "build-release": "npm run --prefix example build-release"
   },
   "keywords": [
     "react-native",

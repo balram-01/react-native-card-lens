@@ -75,7 +75,12 @@ dependencies {
   // Requires NO camera permissions from the app (handled by Play Services).
   implementation "com.google.android.gms:play-services-mlkit-document-scanner:16.0.0"
 
+  // ── On-Device PaddleOCR via Microsoft ONNX Runtime ─────────────────────────
+  // High-performance ONNX Runtime for on-device DBNet text detection & CTC sequence recognition.
+  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
+
   // ── Unit Testing ────────────────────────────────────────────────────────────
   testImplementation "junit:junit:4.13.2"
   testImplementation "org.json:json:20240303"
 }
+

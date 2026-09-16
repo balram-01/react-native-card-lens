@@ -43,6 +43,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   companion object {
     const val NAME = NativeCardLensSpec.NAME
     private const val REQUEST_CODE_DOCUMENT_SCAN = 42273
+    private const val REQUEST_CODE_PICK_DOCUMENT = 42274
   }
 
   init {
@@ -56,17 +57,28 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   private val latinRecognizer by lazy {
     TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
   }
+  private val devanagariRecognizer by lazy {
+    TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+  }
   private val qrBarcodeScanner by lazy {
     val options = BarcodeScannerOptions.Builder()
       .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
       .build()
     BarcodeScanning.getClient(options)
   }
+  private val paddleOcrEngine by lazy {
+    PaddleOcrEngine(reactApplicationContext)
+  }
 
   // State held during active scanner session
   private var pendingScanPromise: Promise? = null
   private var pendingScanAutoOcr: Boolean = false
-  private var pendingScanScript: String = "latin"
+  private var pendingScanScript: String = "auto"
+
+  // State held during active file picker session
+  private var pendingPickPromise: Promise? = null
+  private var pendingPickAutoOcr: Boolean = false
+  private var pendingPickScript: String = "auto"
 
   // ─────────────────────────────────────────────────────────────────────────────
   // startScanner (Live Camera Scanner UI)
@@ -141,7 +153,41 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // ActivityEventListener: Handles Document Scanner result
+  // pickDocument (System Storage File Picker: Images & Multi-page PDFs)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  override fun pickDocument(options: ReadableMap, promise: Promise) {
+    val activity = currentActivity
+    if (activity == null) {
+      promise.reject("CARDLENS_ACTIVITY_UNAVAILABLE", "Cannot open file picker: activity is null.")
+      return
+    }
+    if (pendingPickPromise != null) {
+      promise.reject("CARDLENS_PICK_IN_PROGRESS", "A file pick operation is already in progress.")
+      return
+    }
+
+    pendingPickPromise = promise
+    pendingPickAutoOcr = if (options.hasKey("autoOcr")) options.getBoolean("autoOcr") else false
+    pendingPickScript = if (options.hasKey("script")) options.getString("script") ?: "auto" else "auto"
+    val allowPdf = if (options.hasKey("allowPdf")) options.getBoolean("allowPdf") else true
+
+    try {
+      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "*/*"
+        val mimeTypes = if (allowPdf) arrayOf("image/*", "application/pdf") else arrayOf("image/*")
+        putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
+      }
+      activity.startActivityForResult(intent, REQUEST_CODE_PICK_DOCUMENT)
+    } catch (e: Exception) {
+      pendingPickPromise = null
+      promise.reject("CARDLENS_PICKER_ERROR", e.message ?: "Failed to open document picker", e)
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ActivityEventListener: Handles Document Scanner and File Picker result
   // ─────────────────────────────────────────────────────────────────────────────
 
   override fun onActivityResult(
@@ -150,6 +196,56 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     resultCode: Int,
     data: Intent?
   ) {
+    if (requestCode == REQUEST_CODE_PICK_DOCUMENT) {
+      val pickPromise = pendingPickPromise ?: return
+      pendingPickPromise = null
+
+      if (resultCode != Activity.RESULT_OK || data?.data == null) {
+        pickPromise.reject("CARDLENS_PICK_CANCELED", "File picking was canceled by user.")
+        return
+      }
+
+      val selectedUri = data.data!!
+      backgroundExecutor.execute {
+        try {
+          val resultMap = Arguments.createMap()
+          val urisArray = Arguments.createArray()
+
+          if (ImageLoader.isPdf(reactApplicationContext, selectedUri)) {
+            val pages = ImageLoader.renderPdfToImages(reactApplicationContext, selectedUri)
+            if (pages.isEmpty()) {
+              pickPromise.reject("CARDLENS_PDF_EMPTY", "Could not render pages from PDF.")
+              return@execute
+            }
+            resultMap.putString("imageUri", pages[0])
+            pages.forEach { urisArray.pushString(it) }
+            resultMap.putArray("imageUris", urisArray)
+            resultMap.putString("pdfUri", selectedUri.toString())
+          } else {
+            val cachedImage = ImageLoader.copyToCache(reactApplicationContext, selectedUri)
+            resultMap.putString("imageUri", cachedImage)
+            urisArray.pushString(cachedImage)
+            resultMap.putArray("imageUris", urisArray)
+          }
+
+          val primaryUri = resultMap.getString("imageUri") ?: ""
+          if (pendingPickAutoOcr && primaryUri.isNotEmpty()) {
+            runOcrInternal(primaryUri, pendingPickScript, { ocrMap ->
+              resultMap.putMap("ocrResult", ocrMap)
+              pickPromise.resolve(resultMap)
+            }, {
+              pickPromise.resolve(resultMap)
+            })
+          } else {
+            pickPromise.resolve(resultMap)
+          }
+        } catch (e: Exception) {
+          pickPromise.reject("CARDLENS_PICK_ERROR", e.message ?: "Failed to process selected file", e)
+        }
+      }
+      return
+    }
+
     if (requestCode != REQUEST_CODE_DOCUMENT_SCAN) return
 
     val promise = pendingScanPromise ?: return
@@ -236,28 +332,110 @@ class CardLensModule(reactContext: ReactApplicationContext) :
       try {
         val image = ImageLoader.fromUri(reactApplicationContext, imageUri)
 
-        val options: TextRecognizerOptionsInterface = when (script.lowercase()) {
-          "devanagari" -> DevanagariTextRecognizerOptions.Builder().build()
-          else         -> TextRecognizerOptions.DEFAULT_OPTIONS
-        }
+        when (script.lowercase()) {
+          "devanagari" -> {
+            devanagariRecognizer.process(image)
+              .addOnSuccessListener(backgroundExecutor) { visionText ->
+                try {
+                  val result = Arguments.createMap()
+                  result.putString("rawText", visionText.text)
+                  result.putArray("blocks", serializeBlocks(visionText.textBlocks))
+                  onSuccess(result)
+                } catch (e: Exception) {
+                  onError(e.message ?: "Failed to serialize OCR result")
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) { e ->
+                onError(e.message ?: "OCR processing failed")
+              }
+          }
+          "latin" -> {
+            latinRecognizer.process(image)
+              .addOnSuccessListener(backgroundExecutor) { visionText ->
+                try {
+                  val result = Arguments.createMap()
+                  result.putString("rawText", visionText.text)
+                  result.putArray("blocks", serializeBlocks(visionText.textBlocks))
+                  onSuccess(result)
+                } catch (e: Exception) {
+                  onError(e.message ?: "Failed to serialize OCR result")
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) { e ->
+                onError(e.message ?: "OCR processing failed")
+              }
+          }
+          else -> {
+            // "auto": Run Latin and Devanagari concurrently and fuse them
+            val lock = Any()
+            var latinVision: com.google.mlkit.vision.text.Text? = null
+            var devVision: com.google.mlkit.vision.text.Text? = null
+            var isLatinDone = false
+            var isDevDone = false
+            var reported = false
 
-        val recognizer = TextRecognition.getClient(options)
+            fun tryFinish() {
+              synchronized(lock) {
+                if (reported) return
+                if (isLatinDone && isDevDone) {
+                  reported = true
+                  val lText = latinVision?.text ?: ""
+                  val dText = devVision?.text ?: ""
+                  val result = Arguments.createMap()
 
-        recognizer.process(image)
-          .addOnSuccessListener(backgroundExecutor) { visionText ->
-            try {
-              val result = Arguments.createMap()
-              result.putString("rawText", visionText.text)
-              result.putArray("blocks", serializeBlocks(visionText.textBlocks))
-              onSuccess(result)
-            } catch (e: Exception) {
-              onError(e.message ?: "Failed to serialize OCR result")
+                  if (ScriptDetector.hasDevanagariCodepoints(dText)) {
+                    val lBlocks = latinVision?.let { toRawBlocks(it) } ?: emptyList()
+                    val dBlocks = devVision?.let { toRawBlocks(it) } ?: emptyList()
+                    val fusedBlocks = CardScannerEngine.fuseOcrBlocks(lBlocks, dBlocks)
+                    val fusedText = CardScannerEngine.fuseRawText(lText, dText)
+                    result.putString("rawText", fusedText)
+                    result.putArray("blocks", serializeRawBlocks(fusedBlocks))
+                  } else {
+                    val bestVision = latinVision ?: devVision
+                    if (bestVision != null) {
+                      result.putString("rawText", bestVision.text)
+                      result.putArray("blocks", serializeBlocks(bestVision.textBlocks))
+                    } else {
+                      result.putString("rawText", "")
+                      result.putArray("blocks", Arguments.createArray())
+                    }
+                  }
+                  onSuccess(result)
+                }
+              }
             }
-          }
-          .addOnFailureListener(backgroundExecutor) { e ->
-            onError(e.message ?: "OCR processing failed")
-          }
 
+            latinRecognizer.process(image)
+              .addOnSuccessListener(backgroundExecutor) { vision ->
+                synchronized(lock) {
+                  latinVision = vision
+                  isLatinDone = true
+                  tryFinish()
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) {
+                synchronized(lock) {
+                  isLatinDone = true
+                  tryFinish()
+                }
+              }
+
+            devanagariRecognizer.process(image)
+              .addOnSuccessListener(backgroundExecutor) { vision ->
+                synchronized(lock) {
+                  devVision = vision
+                  isDevDone = true
+                  tryFinish()
+                }
+              }
+              .addOnFailureListener(backgroundExecutor) {
+                synchronized(lock) {
+                  isDevDone = true
+                  tryFinish()
+                }
+              }
+          }
+        }
       } catch (e: Exception) {
         onError(e.message ?: "Failed to load image from URI")
       }
@@ -458,17 +636,34 @@ class CardLensModule(reactContext: ReactApplicationContext) :
         val lock = Any()
         var qrCodeResult: String? = null
         var isQrDone = false
-        var isOcrDone = false
-        var ocrData: Pair<String, List<RawBlock>>? = null
+        var isLatinDone = false
+        var isDevDone = false
+        var latinVision: com.google.mlkit.vision.text.Text? = null
+        var devVision: com.google.mlkit.vision.text.Text? = null
         var reported = false
 
         fun tryComplete() {
           synchronized(lock) {
             if (reported) return
-            if (isOcrDone && isQrDone) {
+            if (isQrDone && isLatinDone && isDevDone) {
               reported = true
-              val (text, blocks) = ocrData!!
-              onSuccess(PageOcrData(text, blocks, qrCodeResult))
+              val lText = latinVision?.text ?: ""
+              val dText = devVision?.text ?: ""
+              val lBlocks = latinVision?.let { toRawBlocks(it) } ?: emptyList()
+              val dBlocks = devVision?.let { toRawBlocks(it) } ?: emptyList()
+
+              val fusedText: String
+              val fusedBlocks: List<RawBlock>
+
+              if (ScriptDetector.hasDevanagariCodepoints(dText)) {
+                fusedText = CardScannerEngine.fuseRawText(lText, dText)
+                fusedBlocks = CardScannerEngine.fuseOcrBlocks(lBlocks, dBlocks)
+              } else {
+                fusedText = if (lText.isNotBlank()) lText else dText
+                fusedBlocks = if (lBlocks.isNotEmpty()) lBlocks else dBlocks
+              }
+
+              onSuccess(PageOcrData(fusedText, fusedBlocks, qrCodeResult))
             }
           }
         }
@@ -484,77 +679,33 @@ class CardLensModule(reactContext: ReactApplicationContext) :
 
         // 2. Run zero-download, pre-installed Latin recognizer concurrently (< 150ms)
         latinRecognizer.process(inputImage)
-          .addOnSuccessListener(backgroundExecutor) { latinVisionText ->
-            val latinText = latinVisionText.text
-            val latinBlocks = toRawBlocks(latinVisionText)
-
-            // If Latin pass produced sufficient text and has no Devanagari codepoints,
-            // complete immediately in sub-second time without triggering slow model downloads.
-            if (!ScriptDetector.shouldRerunWithDevanagari(latinText)) {
-              synchronized(lock) {
-                ocrData = Pair(latinText, latinBlocks)
-                isOcrDone = true
-                tryComplete()
-              }
-            } else {
-              // Hindi/Marathi or low-density card: attempt Devanagari recognizer
-              try {
-                val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-                devanagariRecognizer.process(inputImage)
-                  .addOnSuccessListener(backgroundExecutor) { devVisionText ->
-                    val devText = devVisionText.text
-                    val devBlocks = toRawBlocks(devVisionText)
-                    val fusedBlocks = CardScannerEngine.fuseOcrBlocks(latinBlocks, devBlocks)
-                    val fusedText = CardScannerEngine.fuseRawText(latinText, devText)
-                    synchronized(lock) {
-                      ocrData = Pair(fusedText, fusedBlocks)
-                      isOcrDone = true
-                      tryComplete()
-                    }
-                  }
-                  .addOnFailureListener(backgroundExecutor) {
-                    synchronized(lock) {
-                      ocrData = Pair(latinText, latinBlocks)
-                      isOcrDone = true
-                      tryComplete()
-                    }
-                  }
-              } catch (e: Exception) {
-                synchronized(lock) {
-                  ocrData = Pair(latinText, latinBlocks)
-                  isOcrDone = true
-                  tryComplete()
-                }
-              }
+          .addOnSuccessListener(backgroundExecutor) { vision ->
+            synchronized(lock) {
+              latinVision = vision
+              isLatinDone = true
+              tryComplete()
             }
           }
-          .addOnFailureListener(backgroundExecutor) { latinError ->
-            // If Latin recognition failed, attempt Devanagari recognizer as fallback
-            try {
-              val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-              devanagariRecognizer.process(inputImage)
-                .addOnSuccessListener(backgroundExecutor) { devVisionText ->
-                  synchronized(lock) {
-                    ocrData = Pair(devVisionText.text, toRawBlocks(devVisionText))
-                    isOcrDone = true
-                    tryComplete()
-                  }
-                }
-                .addOnFailureListener(backgroundExecutor) { e ->
-                  synchronized(lock) {
-                    if (!reported) {
-                      reported = true
-                      onError(e)
-                    }
-                  }
-                }
-            } catch (e: Exception) {
-              synchronized(lock) {
-                if (!reported) {
-                  reported = true
-                  onError(latinError)
-                }
-              }
+          .addOnFailureListener(backgroundExecutor) {
+            synchronized(lock) {
+              isLatinDone = true
+              tryComplete()
+            }
+          }
+
+        // 3. Run Devanagari recognizer concurrently in parallel for bilingual Marathi/Hindi cards
+        devanagariRecognizer.process(inputImage)
+          .addOnSuccessListener(backgroundExecutor) { vision ->
+            synchronized(lock) {
+              devVision = vision
+              isDevDone = true
+              tryComplete()
+            }
+          }
+          .addOnFailureListener(backgroundExecutor) {
+            synchronized(lock) {
+              isDevDone = true
+              tryComplete()
             }
           }
       } catch (e: Exception) {
@@ -840,6 +991,45 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     return blocksArray
   }
 
+  private fun serializeRawBlocks(
+    rawBlocks: List<RawBlock>
+  ): WritableArray {
+    val blocksArray = Arguments.createArray()
+    for (block in rawBlocks) {
+      val blockMap = Arguments.createMap()
+      blockMap.putString("text", block.text)
+      val boxMap = Arguments.createMap().apply {
+        putInt("left", block.boundingBox.left)
+        putInt("top", block.boundingBox.top)
+        putInt("right", block.boundingBox.right)
+        putInt("bottom", block.boundingBox.bottom)
+        putInt("width", block.boundingBox.width)
+        putInt("height", block.boundingBox.height)
+      }
+      blockMap.putMap("boundingBox", boxMap)
+
+      val linesArray = Arguments.createArray()
+      for (line in block.lines) {
+        val lineMap = Arguments.createMap()
+        lineMap.putString("text", line.text)
+        val lineBoxMap = Arguments.createMap().apply {
+          putInt("left", line.boundingBox.left)
+          putInt("top", line.boundingBox.top)
+          putInt("right", line.boundingBox.right)
+          putInt("bottom", line.boundingBox.bottom)
+          putInt("width", line.boundingBox.width)
+          putInt("height", line.boundingBox.height)
+        }
+        lineMap.putMap("boundingBox", lineBoxMap)
+        lineMap.putArray("elements", Arguments.createArray())
+        linesArray.pushMap(lineMap)
+      }
+      blockMap.putArray("lines", linesArray)
+      blocksArray.pushMap(blockMap)
+    }
+    return blocksArray
+  }
+
   private fun serializeLines(
     lines: List<com.google.mlkit.vision.text.Text.Line>
   ): WritableArray {
@@ -972,4 +1162,72 @@ class CardLensModule(reactContext: ReactApplicationContext) :
       }
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PaddleOCR Multilingual On-Device Engine
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  override fun recognizeTextPaddle(imageUri: String, options: ReadableMap, promise: Promise) {
+    backgroundExecutor.execute {
+      try {
+        val bitmap = ImageLoader.loadBitmap(reactApplicationContext, imageUri)
+        val boxThresh = if (options.hasKey("boxThresh")) options.getDouble("boxThresh").toFloat() else 0.3f
+        val unclipRatio = if (options.hasKey("unclipRatio")) options.getDouble("unclipRatio").toFloat() else 1.6f
+        val detLimitSideLen = if (options.hasKey("detLimitSideLen")) options.getInt("detLimitSideLen") else 1280
+
+        val result = paddleOcrEngine.process(bitmap, boxThresh, unclipRatio, detLimitSideLen)
+        promise.resolve(result)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_PADDLE_OCR_ERROR", e.message ?: "PaddleOCR processing failed", e)
+      }
+    }
+  }
+
+  override fun isPaddleOcrReady(promise: Promise) {
+    try {
+      val ready = PaddleOcrModelManager.isReady(reactApplicationContext)
+      promise.resolve(ready)
+    } catch (e: Exception) {
+      promise.reject("CARDLENS_PADDLE_STATUS_ERROR", e.message, e)
+    }
+  }
+
+  override fun downloadPaddleOcrModels(options: ReadableMap, promise: Promise) {
+    backgroundExecutor.execute {
+      try {
+        val paddleDir = PaddleOcrModelManager.getPaddleDir(reactApplicationContext)
+        val detUrl = if (options.hasKey("detModelUrl")) options.getString("detModelUrl")!! else PaddleOcrModelManager.DEFAULT_DET_MODEL_URL
+        val recUrl = if (options.hasKey("recModelUrl")) options.getString("recModelUrl")!! else PaddleOcrModelManager.DEFAULT_REC_MODEL_URL
+        val keysUrl = if (options.hasKey("keysUrl")) options.getString("keysUrl")!! else PaddleOcrModelManager.DEFAULT_KEYS_URL
+        val authToken = if (options.hasKey("authToken")) options.getString("authToken") else null
+
+        val filesToDownload = listOf(
+          Triple("det", detUrl, java.io.File(paddleDir, PaddleOcrModelManager.DET_FILENAME)),
+          Triple("rec", recUrl, java.io.File(paddleDir, PaddleOcrModelManager.REC_FILENAME)),
+          Triple("keys", keysUrl, java.io.File(paddleDir, PaddleOcrModelManager.KEYS_FILENAME))
+        )
+
+        for ((fileKey, url, destFile) in filesToDownload) {
+          PaddleOcrModelManager.downloadFile(url, destFile, authToken) { downloaded, total ->
+            try {
+              val params = Arguments.createMap()
+              params.putString("file", fileKey)
+              params.putDouble("downloadedBytes", downloaded.toDouble())
+              params.putDouble("totalBytes", total.toDouble())
+              params.putDouble("percent", if (total > 0) (downloaded.toDouble() / total.toDouble()) * 100.0 else 0.0)
+              reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit("onPaddleOcrDownloadProgress", params)
+            } catch (_: Exception) {}
+          }
+        }
+
+        val initialized = paddleOcrEngine.initSessions()
+        promise.resolve(initialized)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_PADDLE_DOWNLOAD_ERROR", e.message ?: "Failed to download PaddleOCR models", e)
+      }
+    }
+  }
 }
+

@@ -165,6 +165,15 @@ class RealTestCardsTest {
         assertEquals(2, refined.phoneNumbers.size)
         assertEquals("27ADIPJ3019R1Z4", refined.gstin)
         assertTrue(refined.addressLines.any { it.contains("बडककस चौक") })
+
+        // Full Pipeline assembleBusinessCard
+        val assembledCard = CardScannerEngine.assembleBusinessCard(ocrText, emptyList())
+        assertEquals("गुरुगोविंद सिंग फॅशन साडी", assembledCard.companyName)
+        assertEquals("कम्पलीट फॅमिली शॉप", assembledCard.tagline)
+        assertEquals(2, assembledCard.contactPersons.size)
+        assertEquals("27ADIPJ3019R1Z4", assembledCard.gstin)
+        assertEquals(2, assembledCard.phoneNumbers.size)
+        assertTrue(assembledCard.addressLines.any { it.contains("बडककस चौक") })
     }
 
     // ─────────────────────────────────────────────────────────────────────────────

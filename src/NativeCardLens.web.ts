@@ -4,6 +4,7 @@ const webMock: Spec = {
   recognizeText: async () => ({ rawText: '', blocks: [] }),
   scanBarcodes: async () => [],
   startScanner: async () => ({ pages: [], pageCount: 0, status: 'canceled' }),
+  pickDocument: async () => ({ imageUri: '', imageUris: [] }),
   extractContactFields: async () => ({
     phoneNumbers: [],
     emails: [],
@@ -56,6 +57,9 @@ const webMock: Spec = {
   refineCardWithThinkingModule: async (rawText: string) => ({ rawText }),
   unloadThinkingModel: async () => {},
   downloadThinkingModel: async () => '/models/mock.task',
+  recognizeTextPaddle: async () => ({ rawText: '', blocks: [] }),
+  isPaddleOcrReady: async () => false,
+  downloadPaddleOcrModels: async () => false,
 };
 
 export default webMock;

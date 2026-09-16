@@ -14,6 +14,12 @@ jest.mock('./src/NativeCardLens', () => ({
     deleteDownloadedModel: jest.fn().mockResolvedValue(true),
     checkModelDownloadStatus: jest.fn().mockResolvedValue(false),
     listDownloadedModels: jest.fn().mockResolvedValue([]),
+    recognizeText: jest.fn().mockResolvedValue({ rawText: '', blocks: [] }),
+    recognizeTextPaddle: jest
+      .fn()
+      .mockResolvedValue({ rawText: '', blocks: [] }),
+    isPaddleOcrReady: jest.fn().mockResolvedValue(false),
+    downloadPaddleOcrModels: jest.fn().mockResolvedValue(true),
     addListener: jest.fn(),
     removeListeners: jest.fn(),
   },

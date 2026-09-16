@@ -35,6 +35,14 @@ export interface Spec extends TurboModule {
   startScanner(options: Object): Promise<Object>;
 
   /**
+   * Open the system file picker to select an image or PDF (including multi-page PDF).
+   *
+   * @param options  Configuration options map.
+   * @returns        A ScanResult map.
+   */
+  pickDocument(options: Object): Promise<Object>;
+
+  /**
    * Extract structured contact fields (phones, emails, websites, GSTIN, pincodes)
    * from any text string using pure on-device regex heuristics.
    *
@@ -137,6 +145,29 @@ export interface Spec extends TurboModule {
     fileName: string,
     authToken?: string
   ): Promise<string>;
+
+  /**
+   * Run on-device PaddleOCR (PP-OCRv5/v4) multilingual text recognition on the given image URI.
+   *
+   * @param imageUri  A `file://` or `content://` URI pointing to the image.
+   * @param options   Configuration options (boxThresh, unclipRatio, maxSideLen).
+   * @returns         A `RawOcrResult` map serialised as a plain JS object.
+   */
+  recognizeTextPaddle(imageUri: string, options: Object): Promise<Object>;
+
+  /**
+   * Checks if on-device PaddleOCR models (det, rec, keys) are installed and ready.
+   */
+  isPaddleOcrReady(): Promise<boolean>;
+
+  /**
+   * Downloads on-device PaddleOCR models (det, rec, keys) to local internal storage.
+   * Emits live progress events via DeviceEventEmitter ('onPaddleOcrDownloadProgress').
+   *
+   * @param options  Download options (detModelUrl, recModelUrl, keysUrl, authToken).
+   * @returns        Promise<boolean> indicating whether models are ready.
+   */
+  downloadPaddleOcrModels(options: Object): Promise<boolean>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('CardLens');

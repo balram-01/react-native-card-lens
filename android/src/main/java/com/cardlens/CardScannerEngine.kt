@@ -150,7 +150,8 @@ object CardScannerEngine {
     fun assembleBusinessCard(
         rawText: String,
         blocks: List<RawBlock>,
-        qrCodeData: String? = null
+        qrCodeData: String? = null,
+        enableThinkingRefinement: Boolean = true
     ): BusinessCard {
         val t0 = System.currentTimeMillis()
         val contactFields = FieldExtractor.extractContactFields(rawText)
@@ -169,8 +170,8 @@ object CardScannerEngine {
         val t3 = System.currentTimeMillis()
         android.util.Log.i("CardLensSpeed", "    -> parseLayout took ${t3 - t2}ms")
 
-        // 3. Merge into BusinessCard
-        return BusinessCard(
+        // 3. Merge into BusinessCard candidate
+        val candidateCard = BusinessCard(
             companyName = layout.companyName,
             tagline = layout.tagline,
             slogan = layout.slogan,
@@ -185,6 +186,29 @@ object CardScannerEngine {
             gstin = contactFields.gstin.firstOrNull(),
             qrCodeData = qrCodeData,
             rawText = rawText
+        )
+
+        if (!enableThinkingRefinement || rawText.isBlank()) {
+            return candidateCard
+        }
+
+        // Semantic refinement via ThinkingModuleEngine
+        val refined = ThinkingModuleEngine.refineCard(rawText)
+        val finalCompany = when {
+            !refined.companyName.isNullOrBlank() && (candidateCard.companyName.isNullOrBlank() || CardLayoutParser.hasCompanyIndicator(refined.companyName!!)) -> refined.companyName
+            else -> candidateCard.companyName ?: refined.companyName
+        }
+        val finalTagline = candidateCard.tagline ?: refined.tagline
+        val finalPersons = if (candidateCard.contactPersons.isNotEmpty()) candidateCard.contactPersons else refined.contactPersons
+        val finalAddress = if (candidateCard.addressLines.isNotEmpty()) candidateCard.addressLines else refined.addressLines
+
+        return candidateCard.copy(
+            companyName = finalCompany,
+            tagline = finalTagline,
+            contactPersons = finalPersons,
+            addressLines = finalAddress,
+            gstin = candidateCard.gstin ?: refined.gstin,
+            pincode = candidateCard.pincode ?: refined.pincode
         )
     }
 

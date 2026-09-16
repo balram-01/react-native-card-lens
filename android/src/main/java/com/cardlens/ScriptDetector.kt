@@ -41,14 +41,26 @@ object ScriptDetector {
      */
     fun shouldRerunWithDevanagari(latinText: String): Boolean {
         val trimmed = latinText.trim()
-        if (trimmed.isBlank()) return false
+        if (trimmed.isBlank()) return true
 
         // 1. Direct Devanagari codepoints detected
         if (hasDevanagariCodepoints(trimmed)) {
             return true
         }
 
-        // 2. Strong Latin indicators: email, website, or domain patterns
+        // 2. Indian statutory / address / contact signals that warrant Devanagari check
+        val hasIndianContext = trimmed.contains(Regex("\\b[0-3][0-9][A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\\b")) ||
+                               trimmed.contains("+91") ||
+                               trimmed.contains("GSTIN", ignoreCase = true) ||
+                               trimmed.contains("Chowk", ignoreCase = true) ||
+                               trimmed.contains("Nagar", ignoreCase = true) ||
+                               trimmed.contains("Road", ignoreCase = true)
+
+        if (hasIndianContext) {
+            return true
+        }
+
+        // 3. Strong Latin indicators: email, website, or domain patterns
         if (trimmed.contains("@") ||
             trimmed.contains("http://", ignoreCase = true) ||
             trimmed.contains("https://", ignoreCase = true) ||
@@ -63,16 +75,16 @@ object ScriptDetector {
         val letters = trimmed.count { it.isLetter() }
 
         // If card already contains substantial Latin letters, do not rerun
-        if (letters >= 15) {
+        if (letters >= 30) {
             return false
         }
 
-        // 3. Very sparse non-digit fragment typical of Latin OCR scanning Devanagari glyphs (e.g. "a b")
+        // 4. Very sparse non-digit fragment typical of Latin OCR scanning Devanagari glyphs (e.g. "a b")
         if (trimmed.length in 1..10 && letters < 5 && !trimmed.any { it.isDigit() }) {
             return true
         }
 
-        // 4. Garbled symbols check: extremely low letter ratio without phone numbers/digits
+        // 5. Garbled symbols check: extremely low letter ratio without phone numbers/digits
         val letterRatio = letters.toDouble() / trimmed.length.coerceAtLeast(1)
         if (letterRatio < 0.35 && trimmed.length in 10..40 && !trimmed.any { it.isDigit() }) {
             return true

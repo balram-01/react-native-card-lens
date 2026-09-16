@@ -5,17 +5,24 @@
  * always work with `RawOcrResult` / `BarcodeResult` — not `UnsafeObject`.
  */
 import NativeCardLens from './NativeCardLens';
+import { recognizeTextWithPaddle } from './PaddleOCR';
 import type {
   RawOcrResult,
   BarcodeResult,
   OcrScript,
+  RecognizeTextOptions,
   DocumentScannerOptions,
+  PickDocumentOptions,
   ScanResult,
   ContactFields,
   CardLayoutFields,
   BusinessCard,
   BillDocument,
   DocumentScanResult,
+  PaddleOcrOptions,
+  ScanCardOptions,
+  ScanDocumentOptions,
+  ScanBillOptions,
 } from './types';
 
 // ─── re-export all types so library consumers can import from one place ───────
@@ -30,6 +37,7 @@ export type {
   OcrScript,
   ScannerMode,
   DocumentScannerOptions,
+  PickDocumentOptions,
   ScanResult,
   ContactFields,
   LabeledPhone,
@@ -40,6 +48,14 @@ export type {
   BillDocument,
   DocumentType,
   DocumentScanResult,
+  OcrEngine,
+  PaddleOcrOptions,
+  PaddleOcrModelConfig,
+  PaddleOcrDownloadProgress,
+  RecognizeTextOptions,
+  ScanCardOptions,
+  ScanDocumentOptions,
+  ScanBillOptions,
 } from './types';
 
 export {
@@ -49,28 +65,49 @@ export {
 } from './ThinkingModule';
 export type { ThinkingModelDownloadProgress } from './ThinkingModule';
 
+export {
+  isPaddleOcrReady,
+  downloadPaddleOcrModels,
+  recognizeTextWithPaddle,
+  PADDLE_OCR_DOWNLOAD_EVENT,
+} from './PaddleOCR';
+
 // ─── typed bridge wrappers ────────────────────────────────────────────────────
 
 /**
- * Run on-device ML Kit OCR on an image and return the full TextBlock hierarchy
- * including bounding boxes.  No text is sent to any network endpoint.
+ * Run on-device OCR on an image and return the full TextBlock hierarchy
+ * including bounding boxes. Supports Google ML Kit (default) or PaddleOCR.
  *
- * @param imageUri  `file://` or `content://` URI of the image to process.
- * @param script    Which script recognizer to use. Defaults to `'latin'`.
+ * @param imageUri         `file://` or `content://` URI of the image to process.
+ * @param scriptOrOptions  Script ('latin' | 'devanagari') or full RecognizeTextOptions.
  *
  * @example
  * ```ts
+ * // Default ML Kit:
  * const result = await recognizeText('file:///data/.../card.jpg', 'latin');
- * console.log(result.blocks[0].text);      // first paragraph
- * console.log(result.blocks[0].boundingBox); // { left, top, right, bottom }
+ *
+ * // High-Efficiency Multilingual PaddleOCR:
+ * const result = await recognizeText('file:///data/.../card.jpg', { engine: 'paddleocr' });
  * ```
  */
 export async function recognizeText(
   imageUri: string,
-  script: OcrScript = 'auto'
+  scriptOrOptions: OcrScript | RecognizeTextOptions = 'auto'
 ): Promise<RawOcrResult> {
-  const raw = await NativeCardLens.recognizeText(imageUri, script);
-  // The native layer already serialises into the correct shape; we just cast.
+  if (typeof scriptOrOptions === 'object' && scriptOrOptions !== null) {
+    const {
+      engine = 'mlkit',
+      script = 'auto',
+      paddleOptions,
+    } = scriptOrOptions;
+    if (engine === 'paddleocr') {
+      return recognizeTextWithPaddle(imageUri, paddleOptions);
+    }
+    const raw = await NativeCardLens.recognizeText(imageUri, script);
+    return raw as unknown as RawOcrResult;
+  }
+
+  const raw = await NativeCardLens.recognizeText(imageUri, scriptOrOptions);
   return raw as unknown as RawOcrResult;
 }
 
@@ -123,6 +160,33 @@ export async function startScanner(
     script: options.script ?? 'auto',
   };
   const raw = await NativeCardLens.startScanner(config);
+  return raw as unknown as ScanResult;
+}
+
+/**
+ * Open the native system storage / document picker to select a card image or PDF (including multi-page PDF).
+ *
+ * Automatically converts multi-page PDFs into high-resolution PNG page images on-device.
+ *
+ * @param options  Options for picking documents (allowPdf, autoOcr, script).
+ * @returns        A `ScanResult` containing the primary `imageUri`, all `imageUris`, and optional `pdfUri`.
+ *
+ * @example
+ * ```ts
+ * const result = await pickDocument({ allowPdf: true, autoOcr: true });
+ * console.log('Imported Image:', result.imageUri);
+ * console.log('All Pages:', result.imageUris);
+ * ```
+ */
+export async function pickDocument(
+  options: PickDocumentOptions = {}
+): Promise<ScanResult> {
+  const config = {
+    allowPdf: options.allowPdf ?? true,
+    autoOcr: options.autoOcr ?? false,
+    script: options.script ?? 'auto',
+  };
+  const raw = await NativeCardLens.pickDocument(config);
   return raw as unknown as ScanResult;
 }
 
@@ -188,19 +252,26 @@ export async function extractCardLayout(
  * 100% on-device, zero network calls, zero API keys.
  *
  * @param imageUri  `file://` or `content://` URI of the business card image, or an array of URIs (e.g. [front, back]).
+ * @param options   Optional scanner options including OCR engine ('mlkit' or 'paddleocr').
  * @returns         Unified `BusinessCard` object.
  *
  * @example
  * ```ts
  * const card = await scanCard('file:///data/user/0/.../card.jpg');
+ * const paddleCard = await scanCard('file:///card.jpg', { engine: 'paddleocr' });
  * const multiCard = await scanCard(['file:///card_front.jpg', 'file:///card_back.jpg']);
  * ```
  */
 export async function scanCard(
-  imageUri: string | string[]
+  imageUri: string | string[],
+  options?: ScanCardOptions
 ): Promise<BusinessCard> {
+  if (options?.engine === 'paddleocr') {
+    const uris = Array.isArray(imageUri) ? imageUri : [imageUri];
+    return scanCardPagesPaddle(uris, options.paddleOptions);
+  }
   if (Array.isArray(imageUri)) {
-    return scanCardPages(imageUri);
+    return scanCardPages(imageUri, options);
   }
   const raw = await NativeCardLens.scanCard(imageUri);
   return raw as unknown as BusinessCard;
@@ -210,10 +281,14 @@ export async function scanCard(
  * Multi-page business card scanner (e.g. front & back).
  */
 export async function scanCardPages(
-  imageUris: string[]
+  imageUris: string[],
+  options?: ScanCardOptions
 ): Promise<BusinessCard> {
   if (!imageUris || imageUris.length === 0) {
     throw new Error('scanCardPages requires at least one image URI');
+  }
+  if (options?.engine === 'paddleocr') {
+    return scanCardPagesPaddle(imageUris, options.paddleOptions);
   }
   if (imageUris.length === 1) {
     const single = await NativeCardLens.scanCard(imageUris[0]!);
@@ -221,6 +296,75 @@ export async function scanCardPages(
   }
   const raw = await NativeCardLens.scanCardPages(imageUris);
   return raw as unknown as BusinessCard;
+}
+
+async function scanCardPagesPaddle(
+  uris: string[],
+  paddleOptions?: PaddleOcrOptions
+): Promise<BusinessCard> {
+  const pagesData = await Promise.all(
+    uris.map(async (uri) => {
+      const ocr = await recognizeTextWithPaddle(uri, paddleOptions);
+      const [layout, contacts] = await Promise.all([
+        extractCardLayout(ocr),
+        extractContactFields(ocr.rawText),
+      ]);
+      const card: BusinessCard = {
+        companyName: layout.companyName,
+        tagline: layout.tagline,
+        contactPersons: layout.contactPersons,
+        phoneNumbers: contacts.phoneNumbers,
+        emails: contacts.emails,
+        websites: contacts.websites,
+        addressLines: layout.addressLines,
+        pincode: contacts.pincodes[0],
+        gstin: contacts.gstin[0],
+        rawText: ocr.rawText,
+      };
+      return card;
+    })
+  );
+
+  if (pagesData.length === 1) {
+    return pagesData[0]!;
+  }
+
+  return {
+    companyName: pagesData.find((c) => Boolean(c.companyName?.trim()))
+      ?.companyName,
+    tagline: pagesData.find((c) => Boolean(c.tagline?.trim()))?.tagline,
+    slogan: pagesData.find((c) => Boolean(c.slogan?.trim()))?.slogan,
+    providedServices: Array.from(
+      new Set(pagesData.flatMap((c) => c.providedServices || []))
+    ),
+    contactPersons: Array.from(
+      new Map(
+        pagesData
+          .flatMap((c) => c.contactPersons || [])
+          .map((p) => [p.name.trim().toLowerCase(), p])
+      ).values()
+    ),
+    phoneNumbers: Array.from(
+      new Set(pagesData.flatMap((c) => c.phoneNumbers || []))
+    ),
+    labeledPhones: Array.from(
+      new Map(
+        pagesData
+          .flatMap((c) => c.labeledPhones || [])
+          .map((lp) => [lp.number, lp])
+      ).values()
+    ),
+    emails: Array.from(new Set(pagesData.flatMap((c) => c.emails || []))),
+    websites: Array.from(new Set(pagesData.flatMap((c) => c.websites || []))),
+    addressLines: Array.from(
+      new Set(pagesData.flatMap((c) => c.addressLines || []))
+    ),
+    pincode: pagesData.find((c) => Boolean(c.pincode?.trim()))?.pincode,
+    gstin: pagesData.find((c) => Boolean(c.gstin?.trim()))?.gstin,
+    rawText: pagesData
+      .map((c, i) => `--- Page ${i + 1} ---\n${c.rawText}`)
+      .join('\n\n'),
+  };
 }
 
 /**
@@ -237,6 +381,7 @@ export async function scanCardPages(
  * 100% on-device, zero network calls, zero API keys.
  *
  * @param imageUri  `file://` or `content://` URI of the bill or invoice image, or array of page URIs.
+ * @param options   Optional scanner options including OCR engine ('mlkit' or 'paddleocr').
  * @returns         Structured `BillDocument` object.
  *
  * @example
@@ -246,10 +391,11 @@ export async function scanCardPages(
  * ```
  */
 export async function scanBill(
-  imageUri: string | string[]
+  imageUri: string | string[],
+  options?: ScanBillOptions
 ): Promise<BillDocument> {
   if (Array.isArray(imageUri)) {
-    return scanBillPages(imageUri);
+    return scanBillPages(imageUri, options);
   }
   const raw = await NativeCardLens.scanBill(imageUri);
   return raw as unknown as BillDocument;
@@ -259,7 +405,8 @@ export async function scanBill(
  * Multi-page bill & invoice tabular data extractor.
  */
 export async function scanBillPages(
-  imageUris: string[]
+  imageUris: string[],
+  _options?: ScanBillOptions
 ): Promise<BillDocument> {
   if (!imageUris || imageUris.length === 0) {
     throw new Error('scanBillPages requires at least one image URI');
@@ -283,19 +430,26 @@ export async function scanBillPages(
  *  - Otherwise -> runs `scanCard()` -> returns `{ type: 'card', data: BusinessCard }`
  *
  * @param imageUri  `file://` or `content://` URI of the image to scan, or array of page URIs.
+ * @param options   Optional scanner options including OCR engine ('mlkit' or 'paddleocr').
  * @returns         `DocumentScanResult` containing the detected document type and structured data.
  *
  * @example
  * ```ts
  * const result = await scanDocument(scan.imageUri);
+ * const paddleResult = await scanDocument(scan.imageUri, { engine: 'paddleocr' });
  * const multiResult = await scanDocument(scan.imageUris);
  * ```
  */
 export async function scanDocument(
-  imageUri: string | string[]
+  imageUri: string | string[],
+  options?: ScanDocumentOptions
 ): Promise<DocumentScanResult> {
+  if (options?.engine === 'paddleocr') {
+    const uris = Array.isArray(imageUri) ? imageUri : [imageUri];
+    return scanDocumentPagesPaddle(uris, options.paddleOptions);
+  }
   if (Array.isArray(imageUri)) {
-    return scanDocumentPages(imageUri);
+    return scanDocumentPages(imageUri, options);
   }
   const raw = await NativeCardLens.scanDocument(imageUri);
   return raw as unknown as DocumentScanResult;
@@ -305,10 +459,14 @@ export async function scanDocument(
  * Multi-page universal auto-routing document scanner.
  */
 export async function scanDocumentPages(
-  imageUris: string[]
+  imageUris: string[],
+  options?: ScanDocumentOptions
 ): Promise<DocumentScanResult> {
   if (!imageUris || imageUris.length === 0) {
     throw new Error('scanDocumentPages requires at least one image URI');
+  }
+  if (options?.engine === 'paddleocr') {
+    return scanDocumentPagesPaddle(imageUris, options.paddleOptions);
   }
   if (imageUris.length === 1) {
     const single = await NativeCardLens.scanDocument(imageUris[0]!);
@@ -316,6 +474,28 @@ export async function scanDocumentPages(
   }
   const raw = await NativeCardLens.scanDocumentPages(imageUris);
   return raw as unknown as DocumentScanResult;
+}
+
+async function scanDocumentPagesPaddle(
+  uris: string[],
+  paddleOptions?: PaddleOcrOptions
+): Promise<DocumentScanResult> {
+  const ocrResults = await Promise.all(
+    uris.map((u) => recognizeTextWithPaddle(u, paddleOptions))
+  );
+  const combinedText = ocrResults.map((r) => r.rawText).join('\n');
+  const isBill =
+    /invoice|bill\s*(?:#|no|number)|tax\s*invoice|subtotal|amount\s*due|due\s*date|line\s*items/i.test(
+      combinedText
+    );
+
+  if (isBill) {
+    const bill = await scanBill(uris);
+    return { type: 'bill', data: bill };
+  } else {
+    const card = await scanCardPagesPaddle(uris, paddleOptions);
+    return { type: 'card', data: card };
+  }
 }
 
 // ─── Local Neural LLM Engine (Free On-Device AI) ─────────────────────────────

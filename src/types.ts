@@ -71,9 +71,43 @@ export interface BarcodeResult {
   boundingBox: BoundingBox;
 }
 
-// ─── Script selector ─────────────────────────────────────────────────────────
+// ─── Script & Engine selectors ───────────────────────────────────────────────
 
 export type OcrScript = 'latin' | 'devanagari' | 'auto';
+
+export type OcrEngine = 'mlkit' | 'paddleocr' | 'auto';
+
+export interface PaddleOcrOptions {
+  /** Confidence threshold for text box detection (0.0 - 1.0). Default: 0.3 */
+  boxThresh?: number;
+  /** DBNet polygon expansion factor (unclip ratio). Default: 1.6 */
+  unclipRatio?: number;
+  /** Max image side length for detection resize. Default: 960 */
+  maxSideLen?: number;
+}
+
+export interface PaddleOcrModelConfig {
+  detModelUrl?: string;
+  recModelUrl?: string;
+  keysUrl?: string;
+  authToken?: string;
+}
+
+export interface PaddleOcrDownloadProgress {
+  file: 'det' | 'rec' | 'keys';
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+}
+
+export interface RecognizeTextOptions {
+  /** OCR engine to use ('mlkit' | 'paddleocr' | 'auto'). Default: 'mlkit' */
+  engine?: OcrEngine;
+  /** Which OCR script to use for ML Kit ('latin' | 'devanagari' | 'auto'). Default: 'auto' */
+  script?: OcrScript;
+  /** Options specific to PaddleOCR engine */
+  paddleOptions?: PaddleOcrOptions;
+}
 
 // ─── Document Scanner (Live Camera UI) ───────────────────────────────────────
 
@@ -92,6 +126,19 @@ export interface DocumentScannerOptions {
   /** Whether user can pick an image from gallery within the scanner UI. Default: true */
   allowGalleryImport?: boolean;
   /** Whether to automatically run OCR on the scanned image immediately. Default: true */
+  autoOcr?: boolean;
+  /** Which OCR script to use if autoOcr is enabled ('latin' | 'devanagari' | 'auto'). Default: 'auto' */
+  script?: OcrScript;
+  /** Which OCR engine to use for text recognition ('mlkit' | 'paddleocr' | 'auto'). Default: 'mlkit' */
+  ocrEngine?: OcrEngine;
+  /** Options specific to PaddleOCR if chosen */
+  paddleOptions?: PaddleOcrOptions;
+}
+
+export interface PickDocumentOptions {
+  /** Whether to allow selecting PDF files in addition to images. Default: true */
+  allowPdf?: boolean;
+  /** Whether to automatically run OCR on the first page immediately. Default: false */
   autoOcr?: boolean;
   /** Which OCR script to use if autoOcr is enabled ('latin' | 'devanagari' | 'auto'). Default: 'auto' */
   script?: OcrScript;
@@ -202,4 +249,45 @@ export type DocumentType = 'card' | 'bill';
 export interface DocumentScanResult {
   type: DocumentType;
   data: BusinessCard | BillDocument;
+}
+
+// ─── Scanner Engine Options ──────────────────────────────────────────────────
+
+export interface ScanCardOptions {
+  /**
+   * OCR engine to use for text extraction.
+   * - 'mlkit' (default): Google ML Kit concurrent dual-pass (Latin + Devanagari).
+   * - 'paddleocr': High-efficiency on-device PaddleOCR (DBNet + CTC sequence recognition).
+   */
+  engine?: 'mlkit' | 'paddleocr';
+  /**
+   * Optional inference parameters when engine is 'paddleocr'.
+   */
+  paddleOptions?: PaddleOcrOptions;
+}
+
+export interface ScanDocumentOptions {
+  /**
+   * OCR engine to use for text extraction.
+   * - 'mlkit' (default): Google ML Kit concurrent dual-pass (Latin + Devanagari).
+   * - 'paddleocr': High-efficiency on-device PaddleOCR (DBNet + CTC sequence recognition).
+   */
+  engine?: 'mlkit' | 'paddleocr';
+  /**
+   * Optional inference parameters when engine is 'paddleocr'.
+   */
+  paddleOptions?: PaddleOcrOptions;
+}
+
+export interface ScanBillOptions {
+  /**
+   * OCR engine to use for text extraction.
+   * - 'mlkit' (default): Google ML Kit concurrent dual-pass (Latin + Devanagari).
+   * - 'paddleocr': High-efficiency on-device PaddleOCR (DBNet + CTC sequence recognition).
+   */
+  engine?: 'mlkit' | 'paddleocr';
+  /**
+   * Optional inference parameters when engine is 'paddleocr'.
+   */
+  paddleOptions?: PaddleOcrOptions;
 }

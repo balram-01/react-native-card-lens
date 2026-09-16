@@ -174,7 +174,7 @@ Respond with valid JSON only:
 
     fun refineWithSemanticReasoning(rawText: String): BusinessCard {
         val t0 = System.currentTimeMillis()
-        val baseCard = CardScannerEngine.assembleBusinessCard(rawText, emptyList())
+        val baseCard = CardScannerEngine.assembleBusinessCard(rawText, emptyList(), enableThinkingRefinement = false)
         val t1 = System.currentTimeMillis()
         android.util.Log.i("CardLensSpeed", "  -> assembleBusinessCard took ${t1 - t0}ms")
         val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() }

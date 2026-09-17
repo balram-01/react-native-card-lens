@@ -41,6 +41,7 @@ implementation "com.google.android.gms:play-services-mlkit-document-scanner:16.0
 ```
 
 If you require offline deployment on devices without Google Play Services (e.g. AOSP / China builds), switch to bundled models in `android/build.gradle`:
+
 - `com.google.mlkit:text-recognition-bundled-latin:16.0.1` (+3 MB APK size)
 - `com.google.mlkit:text-recognition-bundled-devanagari:16.0.1` (+13 MB APK size)
 
@@ -48,10 +49,10 @@ If you require offline deployment on devices without Google Play Services (e.g. 
 
 ## Permissions
 
-| Method | Permissions Required |
-|---|---|
-| `startScanner()` | **None!** The camera viewfinder runs out-of-process inside Google Play Services. No camera or storage permissions need to be requested in your app's `AndroidManifest.xml`. |
-| `scanCard()`, `scanBill()`, `scanDocument()` (with local gallery/file URIs) | `READ_MEDIA_IMAGES` (Android 13+) or `READ_EXTERNAL_STORAGE` (Android 12 and below) if accessing shared storage files. |
+| Method                                                                      | Permissions Required                                                                                                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `startScanner()`                                                            | **None!** The camera viewfinder runs out-of-process inside Google Play Services. No camera or storage permissions need to be requested in your app's `AndroidManifest.xml`. |
+| `scanCard()`, `scanBill()`, `scanDocument()` (with local gallery/file URIs) | `READ_MEDIA_IMAGES` (Android 13+) or `READ_EXTERNAL_STORAGE` (Android 12 and below) if accessing shared storage files.                                                      |
 
 ---
 
@@ -89,9 +90,11 @@ if (result.type === 'bill') {
 ## API Reference
 
 ### `startScanner(options?: DocumentScannerOptions): Promise<ScanResult>`
+
 Directly launches the Google ML Kit Document Scanner viewfinder with edge detection, auto-capture, and auto-cropping.
 
 **Options:**
+
 - `pageLimit?: number` (default: `1`)
 - `scannerMode?: 'FULL' | 'BASE' | 'BASE_WITH_FILTER'` (default: `'FULL'`)
 - `allowGalleryImport?: boolean` (default: `true`)
@@ -101,6 +104,7 @@ Directly launches the Google ML Kit Document Scanner viewfinder with edge detect
 ---
 
 ### `scanDocument(imageUri: string): Promise<DocumentScanResult>`
+
 Top-level auto-router. Runs on-device OCR, classifies whether the document is a bill/invoice or a business card, and returns structured data.
 
 ```ts
@@ -113,7 +117,9 @@ interface DocumentScanResult {
 ---
 
 ### `scanCard(imageUri: string): Promise<BusinessCard>`
+
 End-to-end business card pipeline:
+
 1. Runs dual-recognizer OCR with smart Devanagari detection
 2. Runs regex extractors (phones, emails, websites, GSTIN, pincodes)
 3. Runs layout heuristics (company name, tagline, person & role, address)
@@ -139,7 +145,9 @@ interface BusinessCard {
 ---
 
 ### `scanBill(imageUri: string): Promise<BillDocument>`
+
 End-to-end bill/invoice table reconstructor:
+
 1. Clusters text bounding boxes horizontally by Y-coordinate into table rows
 2. Clusters header blocks vertically by X-coordinate into columns
 3. Aligns cells into `LineItem[]`
@@ -190,12 +198,12 @@ const response = await extractCardFlow('file:///data/.../card.jpg');
 
 if (response.success && response.data) {
   // Matches exact CardFlowAI backend contract:
-  console.log(response.data.result.data.fullName);        // Primary cardholder name
-  console.log(response.data.result.data.companyName);     // Company / Business name
-  console.log(response.data.result.data.phonePrimary);    // Primary phone
-  console.log(response.data.result.data.contacts);        // Full structured contacts array
-  console.log(response.data.result.confidence);          // Field confidence scores
-  console.log(response.data.needsHumanReview);           // Confidence review flag
+  console.log(response.data.result.data.fullName); // Primary cardholder name
+  console.log(response.data.result.data.companyName); // Company / Business name
+  console.log(response.data.result.data.phonePrimary); // Primary phone
+  console.log(response.data.result.data.contacts); // Full structured contacts array
+  console.log(response.data.result.confidence); // Field confidence scores
+  console.log(response.data.needsHumanReview); // Confidence review flag
 }
 
 // 2. Launch Camera Scanner UI + return CardFlowAI response directly
@@ -227,9 +235,9 @@ console.log('Job ID:', data.jobId); // e.g. "163d5c3b-..."
 
 // 3. Poll Job Status (matches GET /api/v1/jobs/{jobId}/status)
 const status = getJobStatus(data.jobId);
-console.log(status.data.currentNode);         // "extract_business_card"
-console.log(status.data.currentStepMessage);  // "Running On-Device Thinking Module reasoning..."
-console.log(status.data.progressPercentage);  // 62
+console.log(status.data.currentNode); // "extract_business_card"
+console.log(status.data.currentStepMessage); // "Running On-Device Thinking Module reasoning..."
+console.log(status.data.progressPercentage); // 62
 
 // 4. Or use the automated polling helper:
 const finalResult = await pollJobUntilComplete(data.jobId, {
@@ -240,9 +248,14 @@ const finalResult = await pollJobUntilComplete(data.jobId, {
 });
 
 // 5. Or one-line high-level helper with live stage callback:
-const result = await extractCardFlowWithThinking('file:///card.jpg', (stage) => {
-  console.log(`UI Stage: ${stage.currentStepMessage} (${stage.progressPercentage}%)`);
-});
+const result = await extractCardFlowWithThinking(
+  'file:///card.jpg',
+  (stage) => {
+    console.log(
+      `UI Stage: ${stage.currentStepMessage} (${stage.progressPercentage}%)`
+    );
+  }
+);
 ```
 
 ---
@@ -271,15 +284,21 @@ AVAILABLE_LOCAL_MODELS.forEach((m) => {
 // TinyLlama-1.1B Q4_K_M (669 MB) - High Quality
 
 // 2. Query Exact Remote Download Size before downloading
-const remoteInfo = await fetchRemoteModelSize(AVAILABLE_LOCAL_MODELS[0].downloadUrl);
+const remoteInfo = await fetchRemoteModelSize(
+  AVAILABLE_LOCAL_MODELS[0].downloadUrl
+);
 console.log('Actual Server File Size:', remoteInfo.totalMB, 'MB');
 
 // 3. Download Model with Real-Time Streaming Progress, Speed (MB/s), & ETA
 const { localPath } = await downloadLocalModel(
   AVAILABLE_LOCAL_MODELS[0],
   (prog) => {
-    console.log(`Downloaded: ${prog.downloadedMB} / ${prog.totalMB} MB (${prog.percentage}%)`);
-    console.log(`Speed: ${prog.speedMBps} MB/s, ETA: ${prog.estimatedRemainingSeconds}s`);
+    console.log(
+      `Downloaded: ${prog.downloadedMB} / ${prog.totalMB} MB (${prog.percentage}%)`
+    );
+    console.log(
+      `Speed: ${prog.speedMBps} MB/s, ETA: ${prog.estimatedRemainingSeconds}s`
+    );
   }
 );
 
@@ -297,10 +316,21 @@ const refinedCard = await refineCardWithThinkingModule(rawOcrText);
 
 > [!IMPORTANT]
 > Because `react-native-card-lens` operates **100% on-device without cloud LLMs or generative AI models**, layout inferences are rule- and geometry-based:
+>
 > - **Company Name & Tagline**: Inferred via font height (tallest non-contact text block) and vertical positioning. Unusual artistic layouts (e.g. diagonal logos or vertical stylized text) may require manual review.
 > - **Multi-Branch Addresses**: Address extraction groups lines containing location keywords (Road, Nagar, Chowk, Sector, Plot, etc.). If a card lists 3 different city branches, all matched address lines will be returned in `addressLines[]`.
 > - **Table Columns**: Column alignment works best when photos are taken with flat perspective. The included `startScanner()` viewfinder handles auto-flattening and perspective correction automatically.
 > - **Image Quality**: Glare, extreme blur, or clipped card borders will degrade OCR precision.
+
+---
+
+## Architecture & Processing Guides
+
+For an in-depth breakdown of how the extraction pipeline works under the hood:
+
+- 📖 **[Step-by-Step Processing Mechanism](docs/PROCESSING_MECHANISM_STEP_BY_STEP.md)**: End-to-end walkthrough of OCR fusion, layout parsing, deterministic regex, semantic reasoning, and GBNF local SLM decoding.
+- 🧠 **[Local LLM Architecture & Engine Guide](docs/LLM_ARCHITECTURE_AND_ENGINE_GUIDE.md)**: Offline SLM model benchmarks (Qwen2.5, SmolLM2) and GBNF grammars.
+- 🌐 **[Universal Multilingual Pipeline Guide](docs/UNIVERSAL_PIPELINE_GUIDE.md)**: Details on regional Devanagari script processing and edge cases.
 
 ---
 

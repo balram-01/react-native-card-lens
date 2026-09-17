@@ -337,25 +337,27 @@ Respond with valid JSON only:
             }
         }
 
-        // C. Recognize standalone person name lines (e.g. "SAGAR PANJWANI" on card reverse sides)
+        // C. Recognize standalone person name lines (e.g. "पोपट जमदाडे" or "SAGAR PANJWANI")
         lines.forEach { line ->
-            val words = line.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            val stripped = CardLayoutParser.stripReligiousInvocation(line)
+            val lineCandidate = if (stripped.isNotBlank() && stripped.length in 3..40) stripped else line
+            val words = lineCandidate.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
             if (words.size in 2..4 &&
-                line != companyName &&
-                line != tagline &&
-                line != slogan &&
-                !line.contains("@") &&
-                !line.contains("http") &&
-                !line.contains("www.") &&
-                FieldExtractor.extractPhoneNumbers(line).isEmpty() &&
-                FieldExtractor.extractGstin(line).isEmpty() &&
-                !CardLayoutParser.isReligiousInvocation(line) &&
-                !businessTypes.any { line.uppercase().contains(it) } &&
-                !NON_PERSON_KEYWORDS.any { kw -> line.lowercase().contains(kw) } &&
-                !CardLayoutParser.matchesLocationKeyword(line)) {
+                lineCandidate != companyName &&
+                lineCandidate != tagline &&
+                lineCandidate != slogan &&
+                !lineCandidate.contains("@") &&
+                !lineCandidate.contains("http") &&
+                !lineCandidate.contains("www.") &&
+                FieldExtractor.extractPhoneNumbers(lineCandidate).isEmpty() &&
+                FieldExtractor.extractGstin(lineCandidate).isEmpty() &&
+                !CardLayoutParser.isReligiousInvocation(lineCandidate) &&
+                !businessTypes.any { lineCandidate.uppercase().contains(it) } &&
+                !NON_PERSON_KEYWORDS.any { kw -> lineCandidate.lowercase().contains(kw) } &&
+                !CardLayoutParser.matchesLocationKeyword(lineCandidate)) {
                 if (words.all { w -> w.all { it.isLetter() || it in '\u0900'..'\u097F' || it == '.' } }) {
-                    if (persons.none { it.name.equals(line, ignoreCase = true) }) {
-                        persons.add(ContactPerson(line, null))
+                    if (persons.none { it.name.equals(lineCandidate, ignoreCase = true) }) {
+                        persons.add(ContactPerson(lineCandidate, null))
                     }
                 }
             }

@@ -172,7 +172,10 @@ object CardLayoutParser {
         "मंदिर", "मंदीर", "न्यु", "न्यू", "नागपूर", "पुणे", "मुंबई", "नाशिक",
         "ठाणे", "औरंगाबाद", "खरबी", "डायमंड", "नगर",
         "शेजारी", "पेट्रोलपंप", "पेट्रोलपंपा", "ता.", "ता", "तालुका", "जिल्हा",
-        "पंढरपूर", "टेंभुर्णी", "भोसे", "सोलापूर"
+        "पंढरपूर", "टेंभुर्णी", "भोसे", "सोलापूर",
+        "sitabuldi", "dharampeth", "sadar", "gandhibagh", "hingna", "manish nagar",
+        "laxmi nagar", "maharaj bag", "amsterdam", "netherland",
+        "बडकस", "बडकस चौक", "मानेवाडा", "धरमपेठ", "सिताबर्डी"
     )
 
     // Slogan emotional keywords
@@ -404,12 +407,31 @@ object CardLayoutParser {
     }
 
     /**
+     * Strips any inline religious invocations (e.g. "!! श्री जानूबाई देवी प्रसन्न !!") from a line,
+     * allowing person names or contact details on the same line to be recovered.
+     */
+    fun stripReligiousInvocation(text: String): String {
+        var clean = text.trim()
+        clean = clean.replace(Regex("(?:!!|॥|\\|\\|)?\\s*(?:परमात्मा\\s*एक|श्री\\s*[\\p{L}\\p{M}\\s]+(?:प्रसन्न|नमः|कृपा)|श्री\\s*गणेशाय\\s*नमः|स्वामी\\s*समर्थ|[\\p{L}\\p{M}\\s]+प्रसन्न|ॐ\\s*नमः\\s*शिवाय|जय\\s*माता\\s*दी)\\s*(?:!!|॥|\\|\\|)?|॥\\s*श्री\\s*॥|!!\\s*[\\p{L}\\p{M}\\s]+प्रसन्न\\s*!!"), "")
+        clean = clean.replace(Regex("^[|॥!]+\\s*|\\s*[|॥!]+$"), "")
+        return clean.trim()
+    }
+
+    /**
      * Checks whether a text line or block represents a list of offered goods, services, or products
      * (e.g. "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc.").
      */
     fun looksLikeProductOrServiceList(text: String): Boolean {
         val clean = text.trim()
         val lower = clean.lowercase()
+
+        // Location lines and company trade titles with conjunctions (e.g. "स्टील, फर्निचर अॅन्ड इलेक्ट्रॉनिक्स") are not product lists
+        if (matchesLocationKeyword(lower)) return false
+        if (clean.contains("अॅन्ड") || clean.contains(" & ") || clean.contains(" AND ", ignoreCase = true) ||
+            clean.endsWith("pvt ltd", ignoreCase = true) || clean.endsWith("ltd", ignoreCase = true) ||
+            clean.contains("सोल्युशन्स", ignoreCase = true) || clean.contains("solutions", ignoreCase = true)) {
+            return false
+        }
 
         val endsWithEtc = lower.endsWith("etc.") || lower.endsWith("etc") ||
                           lower.endsWith("and more") || lower.endsWith("इत्यादी") || lower.endsWith("आदी")
@@ -420,7 +442,10 @@ object CardLayoutParser {
             "box", "boxes", "mcb", "fan box", "junction box", "modular box", "concealed box",
             "spares", "parts", "fittings", "pipes", "valves", "cables", "wires", "switches",
             "switchgears", "hardware", "tools", "motors", "pumps", "appliances", "equipment",
-            "accessories", "goods", "items", "stationery", "garments", "textiles", "fabrics"
+            "accessories", "goods", "items", "stationery", "garments", "textiles", "fabrics",
+            // Indic / Marathi goods and product keywords
+            "सोफासेट", "सोफा", "कपाट", "टेबल", "फ्रिज", "कुलर",
+            "भांडी", "वस्तु", "सामग्री", "होलसेल", "ऑईल चेंज", "टायर"
         )
         val hasProductKw = productKeywords.any { lower.contains(it) }
 
@@ -428,12 +453,13 @@ object CardLayoutParser {
                                 lower.startsWith("dealers in") || lower.startsWith("all types of") ||
                                 lower.startsWith("all kinds of") || lower.startsWith("manufacturers of") ||
                                 lower.startsWith("mfg. of") || lower.startsWith("services:") ||
-                                lower.startsWith("products:")
+                                lower.startsWith("products:") || lower.startsWith("आमच्याकडे") ||
+                                lower.startsWith("येथे") || lower.contains("मिळतील") || lower.contains("मिळेल")
 
         if (endsWithEtc && commaCount >= 1) return true
-        if (commaCount >= 2 && hasProductKw) return true
         if (hasOfferingPrefix) return true
-        if (commaCount >= 3) return true
+        if (commaCount >= 2 && hasProductKw) return true
+        if (commaCount >= 3 && hasProductKw) return true
 
         return false
     }
@@ -791,9 +817,14 @@ object CardLayoutParser {
                     true
                 }
 
+                val isStatusBar = prevText.matches(Regex("(?i).*\\d{1,2}:\\d{2}.*(?:KB/s|MB/s|\\d+%).*")) ||
+                                  prevText.contains("KB/s", ignoreCase = true)
+
                 val ok = !prevIsSeed && gap <= verticalGap && isSameColumn &&
+                    !isStatusBar &&
                     !isContactInfo(prevText) && !isReligiousInvocation(prevText) &&
                     !isSloganOrTagline(prevText) && !hasCompanyIndicator(prevText) &&
+                    !looksLikeProductOrServiceList(prevText) &&
                     !looksLikeEmailOrWebFragment(prevText) &&
                     !COMPANY_INDICATORS.any { prevText.uppercase().contains(it) } &&
                     !alreadyUsed.contains(prevText) && prevText.length > 3 &&
@@ -822,9 +853,14 @@ object CardLayoutParser {
                     true
                 }
 
+                val isNextStatusBar = nextText.matches(Regex("(?i).*\\d{1,2}:\\d{2}.*(?:KB/s|MB/s|\\d+%).*")) ||
+                                      nextText.contains("KB/s", ignoreCase = true)
+
                 val ok = !nextIsSeed && gap <= verticalGap && isSameColumn &&
+                    !isNextStatusBar &&
                     !isContactInfo(nextText) && !isReligiousInvocation(nextText) &&
                     !isSloganOrTagline(nextText) && !hasCompanyIndicator(nextText) &&
+                    !looksLikeProductOrServiceList(nextText) &&
                     !looksLikeEmailOrWebFragment(nextText) &&
                     !COMPANY_INDICATORS.any { nextText.uppercase().contains(it) } &&
                     !alreadyUsed.contains(nextText) && nextText.length > 3 &&

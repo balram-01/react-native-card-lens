@@ -1174,8 +1174,15 @@ class CardLensModule(reactContext: ReactApplicationContext) :
         val boxThresh = if (options.hasKey("boxThresh")) options.getDouble("boxThresh").toFloat() else 0.3f
         val unclipRatio = if (options.hasKey("unclipRatio")) options.getDouble("unclipRatio").toFloat() else 1.6f
         val detLimitSideLen = if (options.hasKey("detLimitSideLen")) options.getInt("detLimitSideLen") else 1280
+        val script = if (options.hasKey("script")) {
+          options.getString("script") ?: "devanagari"
+        } else if (options.hasKey("language")) {
+          PaddleOcrModelManager.resolveScriptForLanguage(options.getString("language"))
+        } else {
+          PaddleOcrModelManager.getPrimaryAvailableScript(reactApplicationContext)
+        }
 
-        val result = paddleOcrEngine.process(bitmap, boxThresh, unclipRatio, detLimitSideLen)
+        val result = paddleOcrEngine.process(bitmap, boxThresh, unclipRatio, detLimitSideLen, script)
         promise.resolve(result)
       } catch (e: Exception) {
         promise.reject("CARDLENS_PADDLE_OCR_ERROR", e.message ?: "PaddleOCR processing failed", e)
@@ -1195,16 +1202,26 @@ class CardLensModule(reactContext: ReactApplicationContext) :
   override fun downloadPaddleOcrModels(options: ReadableMap, promise: Promise) {
     backgroundExecutor.execute {
       try {
-        val paddleDir = PaddleOcrModelManager.getPaddleDir(reactApplicationContext)
+        val script = if (options.hasKey("script")) {
+          PaddleOcrModelManager.resolveScriptForLanguage(options.getString("script"))
+        } else if (options.hasKey("language")) {
+          PaddleOcrModelManager.resolveScriptForLanguage(options.getString("language"))
+        } else {
+          "devanagari"
+        }
+
+        val detDir = PaddleOcrModelManager.getPaddleDir(reactApplicationContext)
+        val scriptDir = PaddleOcrModelManager.getPaddleDir(reactApplicationContext, script)
+
         val detUrl = if (options.hasKey("detModelUrl")) options.getString("detModelUrl")!! else PaddleOcrModelManager.DEFAULT_DET_MODEL_URL
-        val recUrl = if (options.hasKey("recModelUrl")) options.getString("recModelUrl")!! else PaddleOcrModelManager.DEFAULT_REC_MODEL_URL
-        val keysUrl = if (options.hasKey("keysUrl")) options.getString("keysUrl")!! else PaddleOcrModelManager.DEFAULT_KEYS_URL
+        val recUrl = if (options.hasKey("recModelUrl")) options.getString("recModelUrl")!! else PaddleOcrModelManager.getDefaultRecModelUrl(script)
+        val keysUrl = if (options.hasKey("keysUrl")) options.getString("keysUrl")!! else PaddleOcrModelManager.getDefaultKeysUrl(script)
         val authToken = if (options.hasKey("authToken")) options.getString("authToken") else null
 
         val filesToDownload = listOf(
-          Triple("det", detUrl, java.io.File(paddleDir, PaddleOcrModelManager.DET_FILENAME)),
-          Triple("rec", recUrl, java.io.File(paddleDir, PaddleOcrModelManager.REC_FILENAME)),
-          Triple("keys", keysUrl, java.io.File(paddleDir, PaddleOcrModelManager.KEYS_FILENAME))
+          Triple("det", detUrl, java.io.File(detDir, PaddleOcrModelManager.DET_FILENAME)),
+          Triple("rec", recUrl, java.io.File(scriptDir, PaddleOcrModelManager.REC_FILENAME)),
+          Triple("keys", keysUrl, java.io.File(scriptDir, PaddleOcrModelManager.KEYS_FILENAME))
         )
 
         for ((fileKey, url, destFile) in filesToDownload) {
@@ -1212,6 +1229,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
             try {
               val params = Arguments.createMap()
               params.putString("file", fileKey)
+              params.putString("script", script)
               params.putDouble("downloadedBytes", downloaded.toDouble())
               params.putDouble("totalBytes", total.toDouble())
               params.putDouble("percent", if (total > 0) (downloaded.toDouble() / total.toDouble()) * 100.0 else 0.0)
@@ -1222,7 +1240,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
           }
         }
 
-        val initialized = paddleOcrEngine.initSessions()
+        val initialized = paddleOcrEngine.initSessions(script = script)
         promise.resolve(initialized)
       } catch (e: Exception) {
         promise.reject("CARDLENS_PADDLE_DOWNLOAD_ERROR", e.message ?: "Failed to download PaddleOCR models", e)

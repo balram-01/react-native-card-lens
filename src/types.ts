@@ -77,19 +77,285 @@ export type OcrScript = 'latin' | 'devanagari' | 'auto';
 
 export type OcrEngine = 'mlkit' | 'paddleocr' | 'auto';
 
+export type SupportedOcrLanguage =
+  // Devanagari script (Marathi, Hindi, Nepali, Sanskrit, Konkani, Bhojpuri)
+  | 'mr'
+  | 'hi'
+  | 'ne'
+  | 'sa'
+  | 'kok'
+  | 'bho'
+  // Latin script (English, Spanish, French, German, Italian, Portuguese, Vietnamese, etc.)
+  | 'en'
+  | 'es'
+  | 'fr'
+  | 'de'
+  | 'it'
+  | 'pt'
+  | 'nl'
+  | 'id'
+  | 'ms'
+  | 'tr'
+  | 'vi'
+  | 'pl'
+  | 'sv'
+  // Chinese / Japanese / East Asian
+  | 'zh'
+  | 'zh-Hans'
+  | 'zh-Hant'
+  | 'ja'
+  // Korean
+  | 'ko'
+  // Arabic script (Arabic, Urdu, Persian)
+  | 'ar'
+  | 'fa'
+  | 'ur'
+  // Cyrillic script (Russian, Ukrainian, Belarusian, Bulgarian, Serbian)
+  | 'ru'
+  | 'uk'
+  | 'be'
+  | 'bg'
+  | 'sr'
+  // Indic regional scripts
+  | 'ta' // Tamil
+  | 'te' // Telugu
+  | 'kn' // Kannada
+  | 'ml' // Malayalam
+  | 'bn' // Bengali / Assamese
+  | 'gu' // Gujarati
+  | 'pa' // Punjabi
+  // Thai
+  | 'th'
+  // Greek
+  | 'el';
+
+export type OcrScriptFamily =
+  | 'devanagari'
+  | 'latin'
+  | 'ch'
+  | 'arabic'
+  | 'cyrillic'
+  | 'korean'
+  | 'tamil'
+  | 'telugu'
+  | 'thai'
+  | 'greek';
+
+export interface ScriptModelEndpoints {
+  recModelUrl: string;
+  keysUrl: string;
+}
+
+/** Universal shared DBNet detection model (language-agnostic) */
+export const DEFAULT_PADDLE_DET_URL =
+  'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx';
+
+/**
+ * Public high-speed ONNX model mirrors and dictionary files per script family.
+ */
+export const SCRIPT_MODEL_REGISTRY: Record<
+  OcrScriptFamily,
+  ScriptModelEndpoints
+> = {
+  devanagari: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/hindi/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/hindi/dict.txt',
+  },
+  latin: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/latin/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/latin/dict.txt',
+  },
+  ch: {
+    recModelUrl:
+      'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx',
+    keysUrl:
+      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.8/ppocr/utils/ppocr_keys_v1.txt',
+  },
+  arabic: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/arabic/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/arabic/dict.txt',
+  },
+  cyrillic: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/eslav/dict.txt',
+  },
+  korean: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/dict.txt',
+  },
+  tamil: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/tamil/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/tamil/dict.txt',
+  },
+  telugu: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/telugu/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/telugu/dict.txt',
+  },
+  thai: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/thai/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/thai/dict.txt',
+  },
+  greek: {
+    recModelUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/greek/rec.onnx',
+    keysUrl:
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/greek/dict.txt',
+  },
+};
+
+/**
+ * Maps ISO language codes and alias names to their corresponding PaddleOCR script family.
+ */
+export const LANGUAGE_TO_SCRIPT: Record<string, OcrScriptFamily> = {
+  // Marathi / Hindi / Devanagari
+  'mr': 'devanagari',
+  'marathi': 'devanagari',
+  'hi': 'devanagari',
+  'hindi': 'devanagari',
+  'ne': 'devanagari',
+  'nepali': 'devanagari',
+  'sa': 'devanagari',
+  'sanskrit': 'devanagari',
+  'kok': 'devanagari',
+  'konkani': 'devanagari',
+  'bho': 'devanagari',
+  'bhojpuri': 'devanagari',
+  'devanagari': 'devanagari',
+
+  // Latin
+  'en': 'latin',
+  'english': 'latin',
+  'es': 'latin',
+  'spanish': 'latin',
+  'fr': 'latin',
+  'french': 'latin',
+  'de': 'latin',
+  'german': 'latin',
+  'it': 'latin',
+  'italian': 'latin',
+  'pt': 'latin',
+  'portuguese': 'latin',
+  'nl': 'latin',
+  'dutch': 'latin',
+  'id': 'latin',
+  'indonesian': 'latin',
+  'ms': 'latin',
+  'malay': 'latin',
+  'tr': 'latin',
+  'turkish': 'latin',
+  'vi': 'latin',
+  'vietnamese': 'latin',
+  'pl': 'latin',
+  'polish': 'latin',
+  'sv': 'latin',
+  'swedish': 'latin',
+  'latin': 'latin',
+
+  // Chinese & Japanese
+  'zh': 'ch',
+  'zh-Hans': 'ch',
+  'zh-Hant': 'ch',
+  'cn': 'ch',
+  'chinese': 'ch',
+  'ja': 'ch',
+  'japanese': 'ch',
+  'japan': 'ch',
+  'ch': 'ch',
+
+  // Korean
+  'ko': 'korean',
+  'korean': 'korean',
+
+  // Arabic
+  'ar': 'arabic',
+  'arabic': 'arabic',
+  'fa': 'arabic',
+  'persian': 'arabic',
+  'ur': 'arabic',
+  'urdu': 'arabic',
+
+  // Cyrillic / Slavic
+  'ru': 'cyrillic',
+  'russian': 'cyrillic',
+  'uk': 'cyrillic',
+  'ukrainian': 'cyrillic',
+  'be': 'cyrillic',
+  'belarusian': 'cyrillic',
+  'bg': 'cyrillic',
+  'bulgarian': 'cyrillic',
+  'sr': 'cyrillic',
+  'serbian': 'cyrillic',
+  'cyrillic': 'cyrillic',
+  'eslav': 'cyrillic',
+
+  // Indic scripts
+  'ta': 'tamil',
+  'tamil': 'tamil',
+  'te': 'telugu',
+  'telugu': 'telugu',
+
+  // Thai
+  'th': 'thai',
+  'thai': 'thai',
+
+  // Greek
+  'el': 'greek',
+  'greek': 'greek',
+};
+
+/**
+ * Resolves a given language code or script family name into a valid OcrScriptFamily.
+ * Defaults to 'devanagari' if unrecognized or empty.
+ */
+export function resolveOcrScriptFamily(
+  languageOrScript?: string
+): OcrScriptFamily {
+  if (!languageOrScript) return 'devanagari';
+  const clean = languageOrScript.trim().toLowerCase();
+  return LANGUAGE_TO_SCRIPT[clean] ?? 'devanagari';
+}
+
 export interface PaddleOcrOptions {
+  /** Target language code ('mr', 'hi', 'en', 'fr', 'ar', etc.) or script ('devanagari', 'latin'). Default: 'devanagari' */
+  language?: SupportedOcrLanguage | string;
+  /** Explicit script family name if known. */
+  script?: OcrScriptFamily | string;
   /** Confidence threshold for text box detection (0.0 - 1.0). Default: 0.3 */
   boxThresh?: number;
-  /** DBNet polygon expansion factor (unclip ratio). Default: 1.6 */
+  /** DBNet polygon expansion factor (unclip ratio). Default: 1.6 (boosted to 1.85 for Devanagari to preserve matras). */
   unclipRatio?: number;
-  /** Max image side length for detection resize. Default: 960 */
+  /** Max image side length for detection resize. Default: 1280 */
   maxSideLen?: number;
 }
 
 export interface PaddleOcrModelConfig {
+  /** Target language to download ('mr', 'hi', 'en', 'fr', 'ar', etc.). */
+  language?: SupportedOcrLanguage | string;
+  /** Explicit script family ('devanagari', 'latin', 'arabic', etc.). */
+  script?: OcrScriptFamily | string;
+  /** Custom detection ONNX model URL (optional override) */
   detModelUrl?: string;
+  /** Custom recognition ONNX model URL (optional override) */
   recModelUrl?: string;
+  /** Custom character dictionary URL (optional override) */
   keysUrl?: string;
+  /** Optional Bearer token for private HuggingFace mirrors */
   authToken?: string;
 }
 

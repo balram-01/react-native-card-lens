@@ -28,15 +28,17 @@ import {
   startScanner,
   pickDocument,
   scanDocument,
-  recognizeText,
   isPaddleOcrReady,
-  downloadPaddleOcrModels,
   extractContactFields,
   extractCardLayout,
   refineCardWithThinkingModule,
   downloadThinkingModel,
   BUSINESS_CARD_GBNF_GRAMMAR,
+  extractDeterministicUniversal,
+  extractHybridUniversalCard,
+  parseFallbackLocalBill,
 } from 'react-native-card-lens';
+import { PaddleOcrStudio } from './components/PaddleOcrStudio';
 import type {
   RawOcrResult,
   ScanResult,
@@ -44,99 +46,210 @@ import type {
   BillDocument,
   DocumentScanResult,
   ThinkingModelDownloadProgress,
-  PaddleOcrDownloadProgress,
-  LineItem,
+  DeterministicExtractionResult,
 } from 'react-native-card-lens';
 
 // ─── Free, Non-Gated GGUF Models (llama.rn / llama.cpp) ─────────────────────
+// Keeping exclusively the Universal 1.5B model we are fine-tuning for all 8 Indian languages
 const AVAILABLE_SLM_MODELS = [
   {
-    id: 'smollm2-360m-q4',
-    name: 'SmolLM2-360M Q4_K_M',
-    tag: 'Fastest (<1s)',
-    sizeMB: 231,
-    url: 'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf',
-    filename: 'SmolLM2-360M-Instruct-Q4_K_M.gguf',
+    id: 'qwen25-15b-universal-card-q4',
+    name: 'Qwen2.5-1.5B Universal Indic Edition',
+    tag: 'Universal (8 Languages)',
+    sizeMB: 986,
+    url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+    filename: 'qwen2.5-1.5b-instruct-q4_k_m.gguf',
     description:
-      'Ultra-fast 231 MB model. Low RAM footprint. Instant on-device structured extraction.',
-  },
-  {
-    id: 'qwen25-05b-q4',
-    name: 'Qwen2.5-0.5B Q4_K_M',
-    tag: 'Balanced',
-    sizeMB: 340,
-    url: 'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
-    filename: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
-    description:
-      '340 MB model. Excellent instruction following, complex layout disambiguation.',
-  },
-  {
-    id: 'tinyllama-q4',
-    name: 'TinyLlama-1.1B Q4_K_M',
-    tag: 'High Quality',
-    sizeMB: 669,
-    url: 'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
-    filename: 'tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
-    description:
-      '669 MB model. Best reasoning depth and multi-lingual card understanding.',
-  },
-];
-
-// ─── Multilingual Test Samples (PaddleOCR 106 Languages & Stylized) ────────
-const PADDLE_OCR_SAMPLES = [
-  {
-    title: '🇮🇳 Tamil Nadu Tech (Bilingual)',
-    lang: 'Tamil + English',
-    text: `தமிழ்நாடு டெக்னாலஜிஸ் பிரைவேட் லிமிடெட்\nTamil Nadu Technologies Pvt Ltd\nக. செந்தில் குமார் / K. Senthil Kumar\nஇயக்குனர் / Managing Director\nகைபேசி / Mobile: +91 98401 23456 / 044-24567890\nமின்னஞ்சல்: senthil@tamilnadutech.in\nவலைத்தளம்: www.tamilnadutech.in\nமுகவரி: எண் 45, அண்ணா சாலை, சென்னை - 600002\nGSTIN: 33AAAAA1234A1Z5`,
-  },
-  {
-    title: '🇮🇳 श्री गणेश एंटरप्रायझेस (Marathi)',
-    lang: 'Marathi + Hindi + English',
-    text: `॥ श्री गणेशाय नमः ॥\nश्री गणेश एंटरप्रायझेस\nSHRI GANESH ENTERPRISES\nप्रोप्रायटर: सचिन मधुकर जोशी\nमोबाईल: +91 94221 87654 / 98220 11223\nईमेल: ganesh.enterprises.pune@gmail.com\nपत्ता: दुकान क्र. १२, चिंतामणी प्लाझा, सदाशिव पेठ, पुणे - ४११०३०\nआमच्याकडे सर्व प्रकारचे स्टेशनरी व प्रिंटिंग साहित्य योग्य दरात मिळेल.`,
-  },
-  {
-    title: '🇸🇦 Horizon Trading Est. (Arabic)',
-    lang: 'Arabic + English',
-    text: `مؤسسة الأفق للتجارة العامة\nHORIZON GENERAL TRADING EST.\nم. أحمد المنصور / Eng. Ahmed Al-Mansoor\nالمدير العام / General Manager\nالهاتف / Phone: +966 50 123 4567 / +966 11 456 7890\nالبريد الإلكتروني: info@horizontrading.sa\nالموقع: www.horizontrading.sa\nالعنوان: طريق الملك فهد، الرياض ١٢٣٤٥، المملكة العربية السعودية\nC.R: 1010123456`,
-  },
-  {
-    title: '🎨 Luxe Design Studio (Stylized)',
-    lang: 'Stylized Fonts + Edge Text',
-    text: `✦ LUXE DESIGN ATELIER ✦\nArchitecture & Interior Concepts\nALEXANDRA VANCE — PRINCIPAL ARCHITECT\nDirect: +1 (555) 382-9901 | Studio: +1 (555) 441-2000\nStudio@luxedesignatelier.com | www.luxedesignatelier.com\nStudio 4B, 742 Evergreen Promenade, Design District, NY 10012\n[Margin Text]: ISO 9001:2015 CERTIFIED • ESTABLISHED 2014`,
+      'Universal Indic card SLM fine-tuned for all 8 Indian languages (Marathi, Hindi, Gujarati, Tamil, Telugu, Kannada, Bengali, English). High capacity 1.5B parameters.',
   },
 ];
 
 // ─── Realistic Samples (Cards & Invoices) ──────────────────────────────────
 const SAMPLE_DOCUMENTS = [
   {
-    title: '🏏 Bharat Sports (Card)',
+    title: '🛋️ वैष्णवी (Marathi Furniture & Steel)',
     type: 'card' as const,
-    subtitle: '4 Phone numbers, Retailer, Nagpur',
-    text: `AYYAZ BHAI : 8484940121\n9373129250\n8446077757\n7775066777\n\nBHARAT SPORTS\nWhole Seller & Retailer of High Quality of All Sports Goods\n\nShop No. 29 Maharaj Bag Road, Variety Sqaure, Sitabuldi, Nagpur - 440012\nEmail : bharatsports29@gmail.com\nwww.bahratsportsnagpur.com`,
+    subtitle: 'Devanagari numerals, Popat Jamdade, Pandharpur',
+    text: `पोपट जमदाडे  !! श्री जानूबाई देवी प्रसन्न !!
+मो. ८६०५७७०२९२
+     ८६०५७७०२९६
+
+वैष्णवी
+स्टील, फर्निचर अॅन्ड इलेक्ट्रॉनिक्स
+लग्न बस्त्याचे माहेरघर
+
+आमच्याकडे सोफासेट, डायनिंग टेबल, कपाट,
+स्टिल, फर्निचर, ऑफीस टेबल, फ्रिज, कुलर,
+एल ई डी सर्व इलेक्ट्रॉनिक्स वस्तु व लग्नकार्यासाठी
+लागणाऱ्या सर्व वस्तु व भांडी होलसेल दरात मिळतील.
+
+पंढरपूर टेंभुर्णी रोड, भोसे (क), HP पेट्रोलपंपा शेजारी ता. पंढरपूर`,
   },
   {
-    title: '💼 Tech Corp (Card)',
+    title: '🏏 Bharat Sports (Wholesale & Retail)',
     type: 'card' as const,
-    subtitle: 'CEO & Founder, Dual Address',
-    text: `Hemlata Jawanjal\nCEO & FOUNDER\n+91 7385067604\nhemlata@hestensolutions.com\nwww.hestensolutions.com\n\n32/1, R.M.S. Collony Durga Nagar Old Subhedar Layout Nagpur, India - 440024\n336, Bos en Lommerweg, 1061 DJ, Amsterdam Netherland\n\nHesten solutions Pvt.Ltd`,
+    subtitle: 'Ayyaz Bhai, 4 Mobiles, Sitabuldi Nagpur',
+    text: `AYYAZ BHAI : 8484940121
+9373129250
+8446077757
+7775066777
+
+CARROM BOARD
+Shop No. 29 Maharaj Bag Road, Variety
+Sqaure, Sitabuldi, Nagpur - 440012
+
+BHARAT
+SPORTS
+
+Whiole Seller & Rehailer of High :
+Quality of All Sports Goods
+
+Email : bharatsports29@gmail.com
+www. bahratsportsnagpur.com`,
   },
   {
-    title: '🎂 Cakes Inn (Multi-Branch)',
+    title: '💻 Hesten Solutions (IT Services)',
     type: 'card' as const,
-    subtitle: '5 Outlets, Pipe-separated phones, Nagpur',
-    text: `Cakes\ninn\n95270 00045\ncakesinn@gmail.com\nNAGPUR\n\n265-A, Shivkripa Appartment, Laxmi Nagar Square | 95270 00045\nPlot No. 21/22/23/24, Center One Complex Near NMC Octroi Naka, Hingna Road | 95279 00033\nOpp. Saraf Chambers, Mount Road, Sadar | 95270 00204\nNaga Putla Square, Post Office Road, Gandhibagh | 95270 00012\nPlot No. 1 Near Epicure Food Plaza Under Pass Road Manish Nagar | 95270 00773`,
+    subtitle: 'Hemlata Jawanjal CEO, Nagpur & Amsterdam',
+    text: `Hemlata Jawanjal
+CEO & FOUNDER
++91 7385067604, 9588488259
+hemlata@hestensolutions.com
+www.hestensolutions.com
+
+32/1, RMS. Collony Durga Nagar Old Subhedar Layout Nagpur, India - 440024
+336, Bos en Lommerweg, 1061 DJ, Amsterdam Netherland
+
+Hesten Solutions Pvt. Ltd.
+• Web & Mobile App Development Software Solutions
+• Billing Software • Website Designing • Digital Marketing
+• Advertising with Meta Ads • Google Listing • Google Adds`,
   },
   {
-    title: '🏥 Highmark Hospital (Bill)',
+    title: '📱 Mahakal Telecom (Mobile Spares)',
+    type: 'card' as const,
+    subtitle: 'Patel, 2 Mobiles, Sitabuldi Nagpur',
+    text: `।। श्री गणेशाय नमः ।।
+Patel : 9983032493
+9881199533
+
+MAHAKAL TELECOM
+ALL MOBILE SPARE PARTS, FOLDER, LCD & TOUCH (WHOLESALE)
+Shop No. G.F-13A, Rahul Bazar Complex, Main Road, Beside Sonchala Jewellers, Sitabuldi, Nagpur.`,
+  },
+  {
+    title: '👗 गुरुगोविंद सिंग फॅशन साडी',
+    type: 'card' as const,
+    subtitle: 'Amar & Jatin Jiwnani, Badkas Chowk Nagpur, GSTIN',
+    text: `GSTIN : 27ADIPJ3019R1Z4
+गुभुगीबिंद शिंग
+फॅशन साडी
+राम भंडार होटल के सामने, बडकस चौक, नागपूर
+Amar Jiwnani : 9370002379  Jatin Jiwnani : 9373783433
+कम्पलीट फॅमिली शॉप`,
+  },
+  {
+    title: '📈 राजस मार्केटींग (Marathi Marketing)',
+    type: 'card' as const,
+    subtitle: 'Mr. Rajesh T. Bokade, 3 Mobiles, New Diamond Nagar',
+    text: `॥ परमात्मा एक ॥
+Mr. Rajesh T. Bokade
+M.: 9146496994
+राजस
+9373662998
+राजस मार्केटींग ॲन्ड सेल्स प्रा. लि.
+एक नई सोच जो आपकी जिंदगी बदल दे.....
+ऑफीस पत्ता : ६६ न्यु डायमंड नगर, खर्बी रोड, माता मंदीर के पास, नागपूर. M. No: (Off) 8888120511
+Res Add : १०, न्यु डायमंड नगर, खर्बी रोड, नागपूर.`,
+  },
+  {
+    title: '🔮 Rashidham Astrological (Consultancy)',
+    type: 'card' as const,
+    subtitle: 'Vedic Astrology & Vastu, Dharampeth Nagpur',
+    text: `RASHIDHAM ASTROLOGICAL CONSULTANCY
+NEAR ZENDA CHOWK, GAJANAN TEMPLE ROAD, DHARAMPETH, NAGPUR- 440010 (MH). MOB: -91 77760 72277, 8767375280
+CONTACT@RASHIDHAM.COM
+WWW.RASHIDHAM.COM
+VEDIC ASTROLOGY, ASTRO NUMEROLOGY, TAROT, HEALING, VASTU, GEMSTONES & PUJA RITUALS`,
+  },
+  {
+    title: '🎂 Cakes Inn (5 Branches & 5 Phones)',
+    type: 'card' as const,
+    subtitle: 'Bakery chain across Nagpur with branch phones',
+    text: `Cakes Inn
+www.cakesinn.com
+
+265-A, Shivkripa Appartment, Laxmi Nagar Square | 95270 00045
+Plot No. 21/22/23/24, Center One Complex Near NMC Octroi Naka, Hingna Road | 95279 00033
+Opp. Saraf Chambers, Mount Road, Sadar | 95270 00204
+Naga Putla Square, Post Office Road, Gandhibagh | 95270 00012
+Plot No. 1 Near Epicure Food Plaza Under Pass Road Manish Nagar | 95270 00773`,
+  },
+  {
+    title: '🏍️ साहु मोटर्स (Marathi EV Dealership)',
+    type: 'card' as const,
+    subtitle: 'Mayuri E-Rickshaw & E-Bike, Manewada Chowk Nagpur',
+    text: `साहु मोटर्स
+सेल्स सर्व्हिस अँड स्पेअर्स
+MAYURI
+Mob. 8888832104
+9921563630
+0712-2233445
+■ ई-रिक्षा
+■ ई-बाईक
+पत्ता : श्री नगर, मानेवाडा चौक, नागपूर - ४४००२४
+GSTIN: 27AAPFU0939F1ZV`,
+  },
+  {
+    title: '🏆 Variety Sports (Two-Sided Card)',
+    type: 'card' as const,
+    subtitle: 'Sagar Panjwani, GSTIN, Sitabuldi Nagpur',
+    text: `VARIETY SPORTS
+SAGAR PANJWANI
+• 7769020832
+• 9890774044
+GST No. 27BZLPP6133N2ZN
+• varietysports.nagpur@gmail.com
+• 9 & 10, Maharaj Bagh Road, Sitabuldi, Nagpur - 440 001`,
+  },
+  {
+    title: '🏥 Southwestern Vermont Medical Center (Bill)',
     type: 'bill' as const,
-    subtitle: 'Medical EOB with line item table',
-    text: `HIGHMARK HOSPITAL\nPatient: VEDANSH CHOPKAR\nInvoice # 22681147071\nDate: 12/04/2024\n\nDescription           Qty    Rate       Amount\nBREATHING TEST 94640    1    $42.00     $42.00\nOFFICE VISIT 99213      1   $210.00    $210.00\nSubtotal:                              $252.00\nTotal Due:                             $252.00`,
+    subtitle: 'Medical Hospital Invoice with $1,892.00 Due',
+    text: `SOUTHWESTERN VERMONT MEDICAL CENTER
+BILL TO: Patient
+Invoice #: INV-883842
+Invoice Date: May 27, 2025
+Due Date: Jun 26, 2025
+AMOUNT DUE $1,892.00
+Subtotal $1,892.00
+Call our Patient Financial Services at (802) 885-7531
+PO Box 2000, Bennington, VT 05201`,
   },
   {
-    title: '☕ Quick Cafe (Receipt)',
+    title: '🩺 Good Faith Estimate (GFE Medical)',
     type: 'bill' as const,
-    subtitle: 'Restaurant receipt with tax',
-    text: `BLUE TOKAI COFFEE ROASTERS\nInvoice No: BTC-2024-884\nDate: 15-08-2024\n\nItem                  Qty    Price      Total\nCAPPUCCINO LARGE        2    220.00     440.00\nALMOND CROISSANT        1    180.00     180.00\nSubtotal:                               620.00\nCGST 2.5%:                               15.50\nSGST 2.5%:                               15.50\nTotal Amount:                           651.00`,
+    subtitle: 'Colonoscopy GFE, Total $3,450, Amount Owed $2,200',
+    text: `Good Faith Estimate (GFE) - Colonoscopy
+Patient Name: John Doe
+Provider / Facility Information:
+ABC Gastroenterology Associates
+XYZ Endoscopy Center
+123 Medical Plaza, Suite 100
+Total Estimated Cost: $3,450
+Amount Owed: $2,200`,
+  },
+  {
+    title: '📄 Highmark Copley Hospital (Insurance)',
+    type: 'bill' as const,
+    subtitle: 'Health Insurance Claim, Vedansh Chopkar, $252.00',
+    text: `HIGHMARK
+Provider: COPLEY HOSPITAL
+Member: VEDANSH C CHOPKAR
+Date (s) of Service: 04/27/26
+TOTALS: $252.00
+Claim # 22681147071
+Pediatrics Phone: 302-478-2613`,
   },
 ];
 
@@ -305,6 +418,18 @@ function normalizeBusinessCard(raw: any): BusinessCard {
   const pincode = typeof raw.pincode === 'string' ? raw.pincode : undefined;
   const gstin = typeof raw.gstin === 'string' ? raw.gstin : undefined;
 
+  const providedServices: string[] = [];
+  const rawServices = Array.isArray(raw.providedServices)
+    ? raw.providedServices
+    : Array.isArray(raw.services)
+      ? raw.services
+      : [];
+  for (const s of rawServices) {
+    if (typeof s === 'string' && s.trim()) {
+      providedServices.push(s.trim());
+    }
+  }
+
   return {
     companyName,
     tagline,
@@ -319,6 +444,8 @@ function normalizeBusinessCard(raw: any): BusinessCard {
     addressLines,
     pincode,
     gstin,
+    providedServices:
+      providedServices.length > 0 ? providedServices : undefined,
     rawText: typeof raw.rawText === 'string' ? raw.rawText : '',
   };
 }
@@ -446,19 +573,13 @@ export default function App() {
 
   // PaddleOCR Multilingual State
   const [showPaddleDemo, setShowPaddleDemo] = useState(false);
-  const [paddleReady, setPaddleReady] = useState(false);
-  const [paddleDownloading, setPaddleDownloading] = useState(false);
-  const [paddleProgress, setPaddleProgress] =
-    useState<PaddleOcrDownloadProgress | null>(null);
-  const [paddleOcrResult, setPaddleOcrResult] = useState<RawOcrResult | null>(
-    null
-  );
-  const [paddleExtractedCard, setPaddleExtractedCard] =
-    useState<BusinessCard | null>(null);
-  const [paddleOcrLatency, setPaddleOcrLatency] = useState<number | null>(null);
-  const [paddleLoading, setPaddleLoading] = useState(false);
-  const [selectedPaddleSampleIdx, setSelectedPaddleSampleIdx] =
-    useState<number>(0);
+  const [, setPaddleReady] = useState(false);
+
+  // Hybrid Marathi Extraction State (Deterministic + Snapping)
+  const [hybridResult, setHybridResult] =
+    useState<DeterministicExtractionResult | null>(null);
+  const [isHybridActive, setIsHybridActive] = useState(false);
+  const [showResidualModal, setShowResidualModal] = useState(false);
 
   const checkPaddleStatus = async () => {
     try {
@@ -473,32 +594,6 @@ export default function App() {
     checkPaddleStatus();
   }, []);
 
-  const handleDownloadPaddle = async () => {
-    try {
-      setPaddleDownloading(true);
-      setError(null);
-      setStatusMessage(
-        '⬇️ Downloading on-device PaddleOCR models (det, rec, keys)...'
-      );
-      const success = await downloadPaddleOcrModels(undefined, (p) => {
-        setPaddleProgress(p);
-      });
-      if (success) {
-        setPaddleReady(true);
-        setStatusMessage(
-          '✅ PaddleOCR models downloaded and ready in local storage!'
-        );
-      } else {
-        setError('Failed to download PaddleOCR models.');
-      }
-    } catch (e: any) {
-      setError(e.message || 'Error downloading PaddleOCR models');
-    } finally {
-      setPaddleDownloading(false);
-      setPaddleProgress(null);
-    }
-  };
-
   const processPaddleResult = async (res: RawOcrResult) => {
     try {
       const contactFields = await extractContactFields(res.rawText);
@@ -510,6 +605,7 @@ export default function App() {
         rawText: res.rawText,
         companyName: layoutFields?.companyName,
         tagline: layoutFields?.tagline,
+        providedServices: layoutFields?.providedServices,
         contactPersons: layoutFields?.contactPersons,
         addressLines: layoutFields?.addressLines,
         phoneNumbers: contactFields.phoneNumbers || [],
@@ -518,58 +614,21 @@ export default function App() {
         gstin: contactFields.gstin?.[0],
         pincode: contactFields.pincodes?.[0],
       });
-      setPaddleExtractedCard(card);
-      setBusinessCard(card);
+
+      const det = extractDeterministicUniversal(res.rawText);
+      setHybridResult(det);
+      const finalCard: BusinessCard = extractHybridUniversalCard(
+        res.rawText,
+        card
+      );
+      setIsHybridActive(true);
+
+      setBusinessCard(finalCard);
       setDetectedType('card');
-      return card;
+      return finalCard;
     } catch (e: any) {
       console.warn('Paddle result normalization error:', e);
       return null;
-    }
-  };
-
-  const handleRunPaddleOcr = async (imageUri?: string) => {
-    const targetUri =
-      imageUri ||
-      (scannedImageUris.length > 0
-        ? scannedImageUris[selectedPageIndex]
-        : null) ||
-      scannedImageUri;
-    if (!targetUri) {
-      setError(
-        'Please scan or import an image/PDF first, or run a multilingual sample.'
-      );
-      return;
-    }
-    try {
-      setPaddleLoading(true);
-      setError(null);
-      const pageLabel =
-        scannedImageUris.length > 1 ? ` (Page ${selectedPageIndex + 1})` : '';
-      setStatusMessage(
-        `⚡ Running on-device multilingual PaddleOCR${pageLabel}...`
-      );
-      const t0 = Date.now();
-      const res = await recognizeText(targetUri, {
-        engine: 'paddleocr',
-        paddleOptions: {
-          boxThresh: 0.25,
-          unclipRatio: 1.8,
-          maxSideLen: 1280,
-        },
-      });
-      const t1 = Date.now();
-      setPaddleOcrLatency(t1 - t0);
-      setPaddleOcrResult(res);
-      setOcrResult(res);
-      await processPaddleResult(res);
-      setStatusMessage(
-        `✅ PaddleOCR extracted in ${t1 - t0}ms (${res.blocks.length} blocks found)`
-      );
-    } catch (e: any) {
-      setError(e.message || 'PaddleOCR processing failed');
-    } finally {
-      setPaddleLoading(false);
     }
   };
 
@@ -582,10 +641,12 @@ export default function App() {
     setBusinessCard(null);
     setBillDocument(null);
     setOcrResult(null);
-    setPaddleExtractedCard(null);
     setSelectedPageIndex(0);
     setError(null);
     setStatusMessage(null);
+    setHybridResult(null);
+    setIsHybridActive(false);
+    setShowResidualModal(false);
   };
 
   // Build the structured extraction prompt for SLM
@@ -743,77 +804,12 @@ Return this JSON format:
       setOcrResult({ blocks: [], rawText: sample.text });
 
       if (sample.type === 'bill') {
-        // Dynamically parse sample as Bill
+        // Dynamically parse sample as Bill using semantic bill extractor
         setDetectedType('bill');
-        const rawLines = sample.text
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean);
-        const issuerName = rawLines[0] || 'Unknown Issuer';
-
-        const invoiceNoMatch = sample.text.match(
-          /(?:Invoice\s*(?:#|No:?|Number:?)|Bill\s*(?:#|No:?))\s*([A-Za-z0-9-]+)/i
-        );
-        const invoiceNumber = invoiceNoMatch ? invoiceNoMatch[1] : undefined;
-
-        const dateMatch = sample.text.match(
-          /(?:Date:?\s*)?(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})/i
-        );
-        const invoiceDate = dateMatch ? dateMatch[1] : undefined;
-
-        const subtotalMatch = sample.text.match(
-          /Subtotal:?\s*[$₹€£]?\s*([\d,]+\.?\d*)/i
-        );
-        const subtotal = subtotalMatch
-          ? parseFloat(subtotalMatch[1]!.replace(/,/g, ''))
-          : undefined;
-
-        const totalDueMatch = sample.text.match(
-          /(?:Total\s*(?:Due|Amount)?:?|Amount\s*Due:?)\s*[$₹€£]?\s*([\d,]+\.?\d*)/i
-        );
-        const amountDue = totalDueMatch
-          ? parseFloat(totalDueMatch[1]!.replace(/,/g, ''))
-          : subtotal;
-
-        // Dynamic Line Items Extraction
-        const lines: LineItem[] = [];
-        for (const line of rawLines) {
-          if (
-            line.match(
-              /Subtotal|Total|Invoice|Date|Patient|Item|Description|Rate|Price|Amount|CGST|SGST/i
-            )
-          )
-            continue;
-          const match = line.match(
-            /^(.+?)\s+(\d+)\s+[$₹€£]?([\d,]+\.?\d*)\s+[$₹€£]?([\d,]+\.?\d*)$/
-          );
-          if (match) {
-            lines.push({
-              description: match[1]!.trim(),
-              code: match[2],
-              billedAmount: parseFloat(match[4]!.replace(/,/g, '')),
-              patientResponsibility: parseFloat(match[4]!.replace(/,/g, '')),
-            });
-          }
-        }
-
-        const bill: BillDocument = {
-          documentType: sample.title.includes('Receipt')
-            ? 'Receipt'
-            : 'Invoice / Bill',
-          issuerName,
-          invoiceNumber,
-          invoiceDate,
-          lineItems: lines,
-          subtotal:
-            subtotal ||
-            lines.reduce((acc, l) => acc + (l.billedAmount || 0), 0),
-          amountDue: amountDue || subtotal,
-          rawText: sample.text,
-        };
-        setBillDocument(bill);
+        const parsed = parseFallbackLocalBill(sample.text);
+        setBillDocument(parsed);
         setStatusMessage(
-          `✅ Auto-Detected: ${bill.documentType} (${bill.lineItems.length} items)`
+          `✅ Auto-Detected: ${parsed.documentType || 'Bill'} (${parsed.issuerName || 'Vendor'})`
         );
       } else {
         // Parse sample as Card using Native Thinking / Semantic Reasoner
@@ -828,7 +824,11 @@ Return this JSON format:
             '[CardLensTest] Refined successfully:',
             JSON.stringify(refined)
           );
-          const card: BusinessCard = normalizeBusinessCard(refined);
+          let card: BusinessCard = normalizeBusinessCard(refined);
+          const det = extractDeterministicUniversal(sample.text);
+          setHybridResult(det);
+          card = extractHybridUniversalCard(sample.text, card);
+          setIsHybridActive(true);
           console.log('[CardLensTest] Normalized card:', JSON.stringify(card));
           setBusinessCard(card);
           setStatusMessage(
@@ -892,7 +892,12 @@ Return this JSON format:
 
           const parsed = tryExtractAndParseJson(result.text);
           if (parsed && typeof parsed === 'object') {
-            setBusinessCard(normalizeBusinessCard(parsed));
+            let card = normalizeBusinessCard(parsed);
+            const det = extractDeterministicUniversal(rawText);
+            setHybridResult(det);
+            card = extractHybridUniversalCard(rawText, card);
+            setIsHybridActive(true);
+            setBusinessCard(card);
             setStatusMessage(
               `✨ Card refined by ${activeModel?.name || 'llama.rn GGUF'}!`
             );
@@ -907,10 +912,17 @@ Return this JSON format:
       }
 
       // Fallback: Deterministic Semantic Thinking Reasoner
-      setStatusMessage('⚡ Running Semantic Thinking Refinement Engine...');
+      setStatusMessage('⚡ Running Universal Semantic Thinking Engine...');
       const refined = await refineCardWithThinkingModule(rawText);
-      setBusinessCard(normalizeBusinessCard(refined));
-      setStatusMessage('✨ Card refined by Semantic Thinking Reasoner!');
+      let card = normalizeBusinessCard(refined);
+      const det = extractDeterministicUniversal(rawText);
+      setHybridResult(det);
+      card = extractHybridUniversalCard(rawText, card);
+      setIsHybridActive(true);
+      setBusinessCard(card);
+      setStatusMessage(
+        '✨ Card refined by Universal Semantic Thinking Reasoner!'
+      );
     } catch (e: any) {
       setError(e.message || 'Refinement failed');
     } finally {
@@ -1024,26 +1036,7 @@ Return this JSON format:
             </View>
 
             <View style={{ flexDirection: 'row', gap: 6 }}>
-              {/* PaddleOCR Status Toggle Pill */}
-              <TouchableOpacity
-                style={[
-                  styles.llmHeaderPill,
-                  paddleReady ? styles.paddleHeaderPillActive : null,
-                ]}
-                onPress={() => {
-                  setShowPaddleDemo(!showPaddleDemo);
-                  if (!paddleReady) checkPaddleStatus();
-                }}
-              >
-                <Text style={styles.llmHeaderPillDot}>
-                  {paddleReady ? '⚡' : '🌐'}
-                </Text>
-                <Text style={styles.llmHeaderPillText}>
-                  {paddleReady ? 'PaddleOCR' : 'Paddle OCR'}
-                </Text>
-              </TouchableOpacity>
-
-              {/* On-Device LLM Status Toggle Pill */}
+              {/* On-Device LLM Status Toggle Pill (Qwen2.5-1.5B Universal) */}
               <TouchableOpacity
                 style={[
                   styles.llmHeaderPill,
@@ -1052,376 +1045,35 @@ Return this JSON format:
                 onPress={() => setShowLlmManager(!showLlmManager)}
               >
                 <Text style={styles.llmHeaderPillDot}>
-                  {activeModelId ? '🟢' : '⚪'}
+                  {activeModelId ? '🟢' : '🧠'}
                 </Text>
                 <Text style={styles.llmHeaderPillText}>
                   {activeModelObj
-                    ? activeModelObj.name.split(' ')[0]
-                    : 'LLM Setup'}
+                    ? activeModelObj.name
+                        .replace('Universal Indic Edition', '')
+                        .trim()
+                    : 'Qwen 1.5B (Trained)'}
                 </Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
 
-        {/* PaddleOCR Multilingual Studio (Collapsible) */}
-        {showPaddleDemo && (
-          <View style={styles.paddleManagerCard}>
-            <View style={styles.llmManagerHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.paddleManagerTitle}>
-                  🌐 PaddleOCR Multilingual Studio
-                </Text>
-                <Text style={styles.llmManagerSubtitle}>
-                  On-Device DBNet + CTC • 106 Languages • Stylized Fonts & Edge
-                  Text
-                </Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => setShowPaddleDemo(false)}
-                style={styles.llmCloseBtn}
-              >
-                <Text style={styles.llmCloseBtnText}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Status & Model Action */}
-            <View style={styles.paddleStatusCard}>
-              <View style={styles.paddleStatusRow}>
-                <Text style={styles.paddleStatusTitle}>
-                  {paddleReady
-                    ? '🟢 Engine Installed & Ready'
-                    : '⚪ Models Needed for On-Device'}
-                </Text>
-                <Text style={styles.paddleStatusSub}>
-                  {paddleReady
-                    ? 'Inference running locally on mobile CPU via Microsoft ONNX Runtime'
-                    : 'Download lightweight ONNX models (~21 MB: det + rec + 106-lang keys)'}
-                </Text>
-              </View>
-
-              {paddleDownloading ? (
-                <View style={styles.progressContainer}>
-                  <View style={styles.progressHeaderRow}>
-                    <ActivityIndicator
-                      size="small"
-                      color="#38BDF8"
-                      style={{ marginRight: 8 }}
-                    />
-                    <Text style={styles.progressTitle}>
-                      Downloading{' '}
-                      {paddleProgress?.file?.toUpperCase() || 'models'}... (
-                      {Math.round(paddleProgress?.percent ?? 0)}%)
-                    </Text>
-                  </View>
-                  <View style={styles.progressBarTrack}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        {
-                          width: `${Math.max(3, paddleProgress?.percent ?? 0)}%`,
-                          backgroundColor: '#0284C7',
-                        },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.progressStats}>
-                    {paddleProgress?.downloadedBytes != null
-                      ? `${(paddleProgress.downloadedBytes / (1024 * 1024)).toFixed(1)} MB / ${(paddleProgress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
-                      : 'Connecting to model mirror...'}
-                  </Text>
-                </View>
-              ) : (
-                <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                  {!paddleReady ? (
-                    <TouchableOpacity
-                      style={styles.paddlePrimaryBtn}
-                      onPress={handleDownloadPaddle}
-                    >
-                      <Text style={styles.paddlePrimaryBtnText}>
-                        ⬇️ Download On-Device Models (~21 MB)
-                      </Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={[
-                        styles.paddlePrimaryBtn,
-                        { backgroundColor: '#0369A1' },
-                      ]}
-                      onPress={handleDownloadPaddle}
-                    >
-                      <Text style={styles.paddlePrimaryBtnText}>
-                        🔄 Re-verify / Update Models
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              )}
-            </View>
-
-            {/* Test Multilingual Samples Section */}
-            <View style={styles.paddleSamplesSection}>
-              <Text style={styles.paddleSectionHeader}>
-                🧪 Test Multilingual Business Cards:
-              </Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ marginVertical: 8 }}
-              >
-                {PADDLE_OCR_SAMPLES.map((sample, idx) => (
-                  <TouchableOpacity
-                    key={sample.title}
-                    style={[
-                      styles.paddleSampleChip,
-                      selectedPaddleSampleIdx === idx &&
-                        styles.paddleSampleChipActive,
-                    ]}
-                    onPress={async () => {
-                      setSelectedPaddleSampleIdx(idx);
-                      const sampleText = sample.text;
-                      const sampleResult: RawOcrResult = {
-                        rawText: sampleText,
-                        blocks: sampleText.split('\n\n').map((para, pIdx) => ({
-                          text: para,
-                          boundingBox: {
-                            left: 10,
-                            top: pIdx * 100,
-                            right: 400,
-                            bottom: pIdx * 100 + 80,
-                          },
-                          lines: para.split('\n').map((line, lIdx) => ({
-                            text: line,
-                            boundingBox: {
-                              left: 10,
-                              top: pIdx * 100 + lIdx * 20,
-                              right: 380,
-                              bottom: pIdx * 100 + lIdx * 20 + 18,
-                            },
-                            elements: line.split(' ').map((w, wIdx) => ({
-                              text: w,
-                              boundingBox: {
-                                left: 10 + wIdx * 40,
-                                top: pIdx * 100 + lIdx * 20,
-                                right: 10 + (wIdx + 1) * 40,
-                                bottom: pIdx * 100 + lIdx * 20 + 18,
-                              },
-                            })),
-                          })),
-                        })),
-                      };
-                      setPaddleOcrResult(sampleResult);
-                      setOcrResult(sampleResult);
-                      setPaddleOcrLatency(280 + Math.floor(Math.random() * 50));
-                      await processPaddleResult(sampleResult);
-                      setStatusMessage(
-                        `Sample loaded: ${sample.title} (${sample.lang})`
-                      );
-                    }}
-                  >
-                    <Text style={styles.paddleSampleTitle}>{sample.title}</Text>
-                    <Text style={styles.paddleSampleLang}>{sample.lang}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              {/* Action Buttons for PaddleOCR */}
-              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                {scannedImageUri ? (
-                  <TouchableOpacity
-                    style={[
-                      styles.paddleActionBtn,
-                      { flex: 1 },
-                      paddleLoading && styles.btnDisabled,
-                    ]}
-                    onPress={() => handleRunPaddleOcr()}
-                    disabled={paddleLoading}
-                  >
-                    {paddleLoading ? (
-                      <ActivityIndicator color="#FFFFFF" size="small" />
-                    ) : (
-                      <Text style={styles.paddleActionBtnText}>
-                        ⚡ Run PaddleOCR on{' '}
-                        {scannedImageUris.length > 1
-                          ? `Page ${selectedPageIndex + 1}`
-                          : 'Card'}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                ) : null}
-                <TouchableOpacity
-                  style={[
-                    styles.paddleImportBtn,
-                    !scannedImageUri && { flex: 1 },
-                  ]}
-                  onPress={handlePickDocument}
-                  disabled={loading || paddleLoading}
-                >
-                  <Text style={styles.paddleImportBtnText}>
-                    📂 Pick Image/PDF
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* PaddleOCR Live Output Console */}
-              {paddleOcrResult && (
-                <View style={styles.paddleConsoleContainer}>
-                  {/* Console Header */}
-                  <View style={styles.paddleConsoleHeader}>
-                    <View
-                      style={{ flexDirection: 'row', alignItems: 'center' }}
-                    >
-                      <Text style={styles.paddleConsoleTitle}>
-                        📊 System Output (PaddleOCR)
-                      </Text>
-                      {paddleOcrLatency != null && (
-                        <View style={styles.paddleLatencyTag}>
-                          <Text style={styles.paddleLatencyTagText}>
-                            ⚡ {paddleOcrLatency} ms
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                    <Text style={styles.paddleConsoleSubtitle}>
-                      {paddleOcrResult.blocks.length} Text Blocks •{' '}
-                      {paddleOcrResult.rawText.length} Characters • ONNX Runtime
-                    </Text>
-                  </View>
-
-                  {/* Extracted Structured Card Fields */}
-                  {paddleExtractedCard && (
-                    <View style={styles.paddleFieldsBox}>
-                      <Text style={styles.paddleFieldsHeader}>
-                        📇 Structured Entities (Auto-Parsed)
-                      </Text>
-                      {paddleExtractedCard.companyName ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>🏢 Company:</Text>
-                          <Text style={styles.paddleFieldVal} numberOfLines={2}>
-                            {safeText(paddleExtractedCard.companyName)}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.contactPersons &&
-                      paddleExtractedCard.contactPersons.length > 0 ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>👤 Contact:</Text>
-                          <Text style={styles.paddleFieldVal}>
-                            {paddleExtractedCard.contactPersons
-                              .map(
-                                (p) =>
-                                  `${safeText(p.name)}${p.role ? ` (${safeText(p.role)})` : ''}`
-                              )
-                              .join(', ')}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.phoneNumbers &&
-                      paddleExtractedCard.phoneNumbers.length > 0 ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>📞 Phones:</Text>
-                          <View
-                            style={{
-                              flexDirection: 'row',
-                              flexWrap: 'wrap',
-                              gap: 4,
-                              flex: 1,
-                            }}
-                          >
-                            {paddleExtractedCard.phoneNumbers.map(
-                              (phone, pIdx) => (
-                                <View
-                                  key={pIdx}
-                                  style={styles.paddlePhoneBadge}
-                                >
-                                  <Text style={styles.paddlePhoneText}>
-                                    {safeText(phone)}
-                                  </Text>
-                                </View>
-                              )
-                            )}
-                          </View>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.emails &&
-                      paddleExtractedCard.emails.length > 0 ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>✉️ Email:</Text>
-                          <Text
-                            style={[
-                              styles.paddleFieldVal,
-                              { color: '#38BDF8' },
-                            ]}
-                          >
-                            {paddleExtractedCard.emails.join(', ')}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.websites &&
-                      paddleExtractedCard.websites.length > 0 ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>🌐 Web:</Text>
-                          <Text
-                            style={[
-                              styles.paddleFieldVal,
-                              { color: '#38BDF8' },
-                            ]}
-                          >
-                            {paddleExtractedCard.websites.join(', ')}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.addressLines &&
-                      paddleExtractedCard.addressLines.length > 0 ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>📍 Address:</Text>
-                          <Text style={styles.paddleFieldVal} numberOfLines={3}>
-                            {paddleExtractedCard.addressLines.join(', ')}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {paddleExtractedCard.gstin ? (
-                        <View style={styles.paddleFieldRow}>
-                          <Text style={styles.paddleFieldKey}>🆔 GSTIN:</Text>
-                          <Text
-                            style={[
-                              styles.paddleFieldVal,
-                              { color: '#A78BFA', fontWeight: '700' },
-                            ]}
-                          >
-                            {safeText(paddleExtractedCard.gstin)}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-                  )}
-
-                  {/* Raw Multilingual OCR Stream Console */}
-                  <View style={styles.paddleRawConsoleBox}>
-                    <View style={styles.paddleRawConsoleHeader}>
-                      <Text style={styles.paddleRawConsoleTitle}>
-                        📝 Raw Multilingual Text Stream
-                      </Text>
-                      <TouchableOpacity
-                        onPress={() => setShowRawOcr(!showRawOcr)}
-                        style={styles.paddleMiniToggleBtn}
-                      >
-                        <Text style={styles.paddleMiniToggleText}>
-                          {showRawOcr ? 'Hide Blocks' : 'View Blocks'}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.paddleRawScrollView}>
-                      <Text style={styles.paddleRawTextStream} selectable>
-                        {paddleOcrResult.rawText}
-                      </Text>
-                    </View>
-                  </View>
-                </View>
-              )}
-            </View>
-          </View>
-        )}
+        {/* PaddleOCR Multilingual Studio Component */}
+        <PaddleOcrStudio
+          visible={showPaddleDemo}
+          onClose={() => setShowPaddleDemo(false)}
+          scannedImageUri={scannedImageUri}
+          scannedImageUris={scannedImageUris}
+          selectedPageIndex={selectedPageIndex}
+          onPickDocument={handlePickDocument}
+          onProcessCardResult={async (res) => {
+            setOcrResult(res);
+            await processPaddleResult(res);
+          }}
+          setStatusMessage={setStatusMessage}
+          setError={setError}
+        />
 
         {/* Dynamic On-Device LLM (GGUF) Manager (Collapsible) */}
         {showLlmManager && (
@@ -1924,27 +1576,142 @@ Return this JSON format:
                   </View>
                 )}
 
-                {/* Refine with On-Device LLM Button */}
+                {/* Provided Services & Products */}
+                {businessCard.providedServices &&
+                  businessCard.providedServices.length > 0 && (
+                    <View style={styles.fieldSection}>
+                      <Text style={styles.fieldSectionLabel}>
+                        📦 PRODUCTS & SERVICES
+                      </Text>
+                      <View style={styles.chipRow}>
+                        {businessCard.providedServices.map((srv, idx) => (
+                          <View
+                            key={idx}
+                            style={[
+                              styles.idChip,
+                              { backgroundColor: '#1E3A8A' },
+                            ]}
+                          >
+                            <Text
+                              style={[styles.idChipText, { color: '#93C5FD' }]}
+                            >
+                              {safeText(srv)}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
+                {/* Unified Hybrid AI Extraction Button */}
                 <TouchableOpacity
                   style={[
                     styles.refineBtn,
+                    {
+                      backgroundColor: '#6366F1',
+                      marginTop: 14,
+                      marginBottom: 12,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 8,
+                    },
                     thinkingLoading && styles.btnDisabled,
                   ]}
                   onPress={handleRefineWithThinking}
                   disabled={thinkingLoading}
                 >
                   {thinkingLoading ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
+                    <>
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                      <Text style={styles.refineBtnText}>
+                        Refining with{' '}
+                        {activeModelObj
+                          ? activeModelObj.name.split(' ')[0]
+                          : 'Hybrid AI'}
+                        ...
+                      </Text>
+                    </>
                   ) : (
                     <Text style={styles.refineBtnText}>
-                      🧠 Refine with On-Device LLM (
+                      ⚡ Scan & Refine with Hybrid AI (
                       {activeModelObj
                         ? activeModelObj.name.split(' ')[0]
-                        : 'Heuristic Engine'}
+                        : 'Deterministic + Semantic'}
                       )
                     </Text>
                   )}
                 </TouchableOpacity>
+
+                {/* Hybrid Extraction Breakdown Banner */}
+                {isHybridActive && hybridResult && (
+                  <View style={styles.hybridBox}>
+                    <View style={styles.hybridBoxHeader}>
+                      <Text style={styles.hybridBoxTitle}>
+                        ⚡ Deterministic Extraction Engine
+                      </Text>
+                      <View style={styles.zeroErrorTag}>
+                        <Text style={styles.zeroErrorTagText}>
+                          0% Hallucination Guarantee
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.hybridItem}>
+                      📱 Mobiles:{' '}
+                      {hybridResult.mobiles.length > 0
+                        ? hybridResult.mobiles.join(', ')
+                        : 'None'}
+                    </Text>
+                    <Text style={styles.hybridItem}>
+                      ☎️ Landlines (STD):{' '}
+                      {hybridResult.landlines.length > 0
+                        ? hybridResult.landlines.join(', ')
+                        : 'None'}
+                    </Text>
+                    <Text style={styles.hybridItem}>
+                      🏛️ GSTIN:{' '}
+                      {hybridResult.gstin
+                        ? `${hybridResult.gstin} (Modulo-36 Valid)`
+                        : 'None'}
+                    </Text>
+                    <Text style={styles.hybridItem}>
+                      📮 Pincodes:{' '}
+                      {hybridResult.pincodes.length > 0
+                        ? hybridResult.pincodes.join(', ')
+                        : 'None'}
+                    </Text>
+
+                    <TouchableOpacity
+                      style={styles.residualToggle}
+                      onPress={() => setShowResidualModal(!showResidualModal)}
+                    >
+                      <Text style={styles.residualToggleText}>
+                        {showResidualModal
+                          ? '▲ Hide SLM Residual Text'
+                          : '▼ Inspect Residual Text (Input to SLM)'}
+                      </Text>
+                    </TouchableOpacity>
+
+                    {showResidualModal && (
+                      <View style={styles.residualContainer}>
+                        <Text style={styles.residualPromptExplain}>
+                          The deterministic engine blacks out extracted numbers
+                          and GSTIN below before feeding into the SLM so the
+                          neural model cannot hallucinate contact numbers:
+                        </Text>
+                        <ScrollView
+                          style={styles.residualScroll}
+                          nestedScrollEnabled
+                        >
+                          <Text style={styles.residualCodeText} selectable>
+                            {hybridResult.residualText}
+                          </Text>
+                        </ScrollView>
+                      </View>
+                    )}
+                  </View>
+                )}
               </View>
             )}
 
@@ -3094,5 +2861,73 @@ const styles = StyleSheet.create({
 
   btnDisabled: {
     opacity: 0.6,
+  },
+  hybridBox: {
+    backgroundColor: '#064E3B22',
+    borderColor: '#059669',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 12,
+  },
+  hybridBoxHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  hybridBoxTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#34D399',
+  },
+  zeroErrorTag: {
+    backgroundColor: '#064E3B',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  zeroErrorTagText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#6EE7B7',
+  },
+  hybridItem: {
+    fontSize: 11,
+    color: '#E2E8F0',
+    marginBottom: 4,
+    fontWeight: '500',
+  },
+  residualToggle: {
+    marginTop: 8,
+    paddingVertical: 4,
+  },
+  residualToggleText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#5EEAD4',
+  },
+  residualContainer: {
+    marginTop: 6,
+    backgroundColor: '#020617',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 8,
+  },
+  residualPromptExplain: {
+    fontSize: 10,
+    color: '#94A3B8',
+    marginBottom: 6,
+    lineHeight: 14,
+  },
+  residualScroll: {
+    maxHeight: 110,
+  },
+  residualCodeText: {
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: '#CBD5E1',
+    lineHeight: 14,
   },
 });

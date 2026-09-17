@@ -31,49 +31,71 @@ class PaddleOcrEngine(private val context: Context) {
 
     private val ortEnv: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
     private var detSession: OrtSession? = null
-    private var recSession: OrtSession? = null
-    private var dictionary: List<String> = emptyList()
+    private val recSessionMap = java.util.concurrent.ConcurrentHashMap<String, OrtSession>()
+    private val dictionaryMap = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 
     @Synchronized
-    fun isLoaded(): Boolean {
-        return detSession != null && recSession != null && dictionary.isNotEmpty()
+    fun isLoaded(script: String? = null): Boolean {
+        val targetScript = PaddleOcrModelManager.resolveScriptForLanguage(script)
+        return detSession != null && recSessionMap.containsKey(targetScript) && dictionaryMap[targetScript]?.isNotEmpty() == true
     }
 
     /**
-     * Initializes the ONNX sessions for detection and recognition models.
+     * Backward-compatible check: is any recognition session loaded?
      */
     @Synchronized
-    fun initSessions(detFile: File? = null, recFile: File? = null): Boolean {
-        if (isLoaded()) return true
+    fun isAnyLoaded(): Boolean {
+        return detSession != null && recSessionMap.isNotEmpty()
+    }
 
-        val det = detFile ?: PaddleOcrModelManager.getDetModelFile(context)
-        val rec = recFile ?: PaddleOcrModelManager.getRecModelFile(context)
+    /**
+     * Initializes the ONNX sessions for detection and recognition models for a specific script.
+     */
+    @Synchronized
+    fun initSessions(detFile: File? = null, recFile: File? = null, script: String? = null): Boolean {
+        val targetScript = PaddleOcrModelManager.resolveScriptForLanguage(script)
 
-        if (det == null || !det.exists() || rec == null || !rec.exists()) {
-            return false
+        // 1. Initialize universal detection session if not yet loaded
+        if (detSession == null) {
+            val det = detFile ?: PaddleOcrModelManager.getDetModelFile(context)
+            if (det == null || !det.exists()) return false
+
+            val sessionOptions = OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(4)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            }
+            detSession = ortEnv.createSession(det.absolutePath, sessionOptions)
         }
 
-        val sessionOptions = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(4)
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        // 2. Initialize script recognition session & dictionary if not yet loaded
+        if (!recSessionMap.containsKey(targetScript)) {
+            val rec = recFile ?: PaddleOcrModelManager.getRecModelFile(context, targetScript)
+            if (rec == null || !rec.exists()) return false
+
+            val sessionOptions = OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(4)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            }
+            val recSession = ortEnv.createSession(rec.absolutePath, sessionOptions)
+            val dict = PaddleOcrModelManager.loadDictionary(context, targetScript)
+            if (dict.isEmpty()) return false
+
+            recSessionMap[targetScript] = recSession
+            dictionaryMap[targetScript] = dict
         }
 
-        detSession = ortEnv.createSession(det.absolutePath, sessionOptions)
-        recSession = ortEnv.createSession(rec.absolutePath, sessionOptions)
-        dictionary = PaddleOcrModelManager.loadDictionary(context)
-
-        return isLoaded()
+        return isLoaded(targetScript)
     }
 
     @Synchronized
     fun close() {
         try {
             detSession?.close()
-            recSession?.close()
+            recSessionMap.values.forEach { it.close() }
         } catch (_: Exception) {}
         detSession = null
-        recSession = null
-        dictionary = emptyList()
+        recSessionMap.clear()
+        dictionaryMap.clear()
     }
 
     data class RecognizedBox(
@@ -84,11 +106,24 @@ class PaddleOcrEngine(private val context: Context) {
 
     /**
      * Runs full end-to-end OCR on the provided Bitmap and returns standard RawOcrResult WritableMap.
+     *
+     * @param script  Target script family ('devanagari', 'latin', 'arabic', 'ch', etc.)
      */
-    fun process(bitmap: Bitmap, boxThresh: Float = 0.3f, unclipRatio: Float = 1.6f, maxSideLen: Int = 1280): WritableMap {
-        if (!initSessions()) {
-            throw IllegalStateException("PaddleOCR models not ready or failed to load.")
+    fun process(
+        bitmap: Bitmap,
+        boxThresh: Float = 0.3f,
+        unclipRatio: Float = 1.6f,
+        maxSideLen: Int = 1280,
+        script: String? = null
+    ): WritableMap {
+        val targetScript = PaddleOcrModelManager.resolveScriptForLanguage(script)
+        if (!initSessions(script = targetScript)) {
+            throw IllegalStateException("PaddleOCR models for script '$targetScript' not ready or failed to load.")
         }
+
+        // For Devanagari (Marathi/Hindi), automatically elevate unclip ratio to 1.85f if default 1.6 was given,
+        // preventing top Shirorekha matras (े, ै, ो, औ, ं) and bottom matras (ु, ू, ृ) from getting clipped by DBNet
+        val effectiveUnclipRatio = if (targetScript == "devanagari" && unclipRatio <= 1.6f) 1.85f else unclipRatio
 
         val originalW = bitmap.width
         val originalH = bitmap.height
@@ -106,8 +141,8 @@ class PaddleOcrEngine(private val context: Context) {
         detOutput.close()
         tensor.close()
 
-        // 2. Extract bounding boxes from probability map
-        val rawBoxes = extractBoxesFromProbMap(probMap, detInput.targetW, detInput.targetH, boxThresh, unclipRatio)
+        // 2. Extract bounding boxes from probability map with effective unclip expansion
+        val rawBoxes = extractBoxesFromProbMap(probMap, detInput.targetW, detInput.targetH, boxThresh, effectiveUnclipRatio)
 
         // Rescale bounding boxes back to original image dimensions
         val scaleX = originalW.toFloat() / detInput.targetW.toFloat()
@@ -130,18 +165,61 @@ class PaddleOcrEngine(private val context: Context) {
             if (abs(yDiff) > 15) yDiff else a.left - b.left
         }
 
-        // 3. Crop each box and run sequence recognition
+        // 3. Crop each box and run sequence recognition with target script
         val recognizedLines = mutableListOf<RecognizedBox>()
         for (box in sortedBoxes) {
             val crop = cropBox(bitmap, box) ?: continue
-            val recognizedText = recognizeCrop(crop)
-            if (recognizedText.text.isNotBlank()) {
-                recognizedLines.add(RecognizedBox(box, recognizedText.text, recognizedText.confidence))
+            val recognizedText = recognizeCrop(crop, targetScript)
+            if (isValidTextLine(recognizedText.text, recognizedText.confidence, box, originalW, originalH)) {
+                recognizedLines.add(RecognizedBox(box, recognizedText.text.trim(), recognizedText.confidence))
             }
         }
 
         // 4. Structure into standard CardLens RawOcrResult (blocks -> lines -> elements)
         return serializeToRawOcrResult(recognizedLines, originalW, originalH)
+    }
+
+    companion object {
+        /**
+         * Filters out non-text logo hallucinations, decorative emblems, and noise symbols.
+         */
+        fun isValidTextLine(text: String, confidence: Float, box: Rect, imageW: Int, imageH: Int): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) return false
+
+            // 1. Must contain at least one genuine letter (Latin, Devanagari, Arabic, Cyrillic, CJK, etc.) or digit
+            val hasValidScriptChar = trimmed.any { ch ->
+                (ch in '\u0900'..'\u097F') || // Devanagari (Marathi, Hindi, Sanskrit)
+                (ch in 'a'..'z') || (ch in 'A'..'Z') || (ch in '0'..'9') ||
+                (ch in '\u0600'..'\u06FF') || // Arabic
+                (ch in '\u0400'..'\u04FF') || // Cyrillic
+                (ch in '\u4E00'..'\u9FFF') || // CJK
+                (ch in '\u0B80'..'\u0BFF') || // Tamil
+                (ch in '\u0C00'..'\u0C7F')    // Telugu
+            }
+            if (!hasValidScriptChar) return false
+
+            // 2. Reject single isolated punctuation or symbol noise
+            if (trimmed.length == 1 && !trimmed[0].isLetterOrDigit() && trimmed[0] !in '\u0900'..'\u097F') {
+                return false
+            }
+
+            // 3. Reject low-confidence logo hallucinations
+            if (confidence < 0.32f && trimmed.length <= 4) {
+                return false
+            }
+
+            // 4. Reject disproportionately massive square logo blocks (Area > 15% of image with aspect ratio 0.8..1.25)
+            if (imageW > 0 && imageH > 0) {
+                val areaRatio = (box.width().toLong() * box.height().toLong()).toFloat() / (imageW.toLong() * imageH.toLong()).toFloat()
+                val aspect = box.width().toFloat() / max(1, box.height()).toFloat()
+                if (areaRatio > 0.15f && aspect in 0.80f..1.25f && trimmed.length < 10) {
+                    return false
+                }
+            }
+
+            return true
+        }
     }
 
     private data class DetInput(
@@ -294,7 +372,10 @@ class PaddleOcrEngine(private val context: Context) {
     /**
      * Resizes cropped text line image to fixed height 48, runs ONNX recognition, and applies CTC greedy decoding.
      */
-    private fun recognizeCrop(crop: Bitmap): RecResult {
+    private fun recognizeCrop(crop: Bitmap, script: String): RecResult {
+        val session = recSessionMap[script] ?: return RecResult("", 0.0f)
+        val dict = dictionaryMap[script] ?: return RecResult("", 0.0f)
+
         val targetH = 48
         val scale = targetH.toFloat() / crop.height.toFloat()
         var targetW = (crop.width * scale).toInt()
@@ -324,7 +405,7 @@ class PaddleOcrEngine(private val context: Context) {
         val shape = longArrayOf(1, 3, targetH.toLong(), targetW.toLong())
         val tensor = OnnxTensor.createTensor(ortEnv, buffer, shape)
 
-        val recOutput = recSession?.run(mapOf(recSession!!.inputNames.iterator().next() to tensor))
+        val recOutput = session.run(mapOf(session.inputNames.iterator().next() to tensor))
         @Suppress("UNCHECKED_CAST")
         val logits = (recOutput?.get(0)?.value as? Array<Array<FloatArray>>)?.get(0)
             ?: return RecResult("", 0.0f)
@@ -333,13 +414,14 @@ class PaddleOcrEngine(private val context: Context) {
         tensor.close()
 
         // CTC Greedy Decoding
-        return decodeCtc(logits)
+        return decodeCtc(logits, dict)
     }
 
     /**
      * Performs CTC Greedy Argmax decoding against the loaded character dictionary.
      */
-    fun decodeCtc(logits: Array<FloatArray>): RecResult {
+    fun decodeCtc(logits: Array<FloatArray>, dict: List<String> = emptyList()): RecResult {
+        val activeDict = if (dict.isNotEmpty()) dict else (dictionaryMap.values.firstOrNull() ?: emptyList())
         val sb = StringBuilder()
         var prevIndex = -1
         var totalProb = 0.0f
@@ -358,8 +440,8 @@ class PaddleOcrEngine(private val context: Context) {
 
             // Index 0 is CTC blank token
             if (maxIdx != 0 && maxIdx != prevIndex) {
-                if (maxIdx < dictionary.size) {
-                    val char = dictionary[maxIdx]
+                if (maxIdx < activeDict.size) {
+                    val char = activeDict[maxIdx]
                     sb.append(char)
                     totalProb += maxVal
                     count++

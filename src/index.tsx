@@ -49,6 +49,9 @@ export type {
   DocumentType,
   DocumentScanResult,
   OcrEngine,
+  SupportedOcrLanguage,
+  OcrScriptFamily,
+  ScriptModelEndpoints,
   PaddleOcrOptions,
   PaddleOcrModelConfig,
   PaddleOcrDownloadProgress,
@@ -56,6 +59,13 @@ export type {
   ScanCardOptions,
   ScanDocumentOptions,
   ScanBillOptions,
+} from './types';
+
+export {
+  LANGUAGE_TO_SCRIPT,
+  SCRIPT_MODEL_REGISTRY,
+  DEFAULT_PADDLE_DET_URL,
+  resolveOcrScriptFamily,
 } from './types';
 
 export {
@@ -511,6 +521,20 @@ export {
   fetchRemoteModelSize,
   onModelDownloadProgress,
   getModelDownloadProgress,
+  normalizeDevanagariNumbers,
+  normalizeIndicDigits,
+  INDIC_DIGIT_MAP,
+  devanagariSkeleton,
+  levenshteinDistance,
+  skeletonSimilarity,
+  MARATHI_OCR_ALIASES,
+  isLikelyLogoArtifact,
+  extractDeterministicMarathi,
+  extractDeterministicUniversal,
+  extractHybridMarathiCard,
+  extractHybridUniversalCard,
+  parseFallbackLocalBill,
+  enhanceBillWithLocalLLM,
 } from './LocalCardLLM';
 export type {
   LocalLLMOptions,
@@ -518,6 +542,7 @@ export type {
   ModelDownloadProgress,
   ModelStatus,
   RemoteModelSizeInfo,
+  DeterministicExtractionResult,
 } from './LocalCardLLM';
 
 // ─── CardFlowAI Backend Drop-in Compatibility & Polling Pipeline ───────────

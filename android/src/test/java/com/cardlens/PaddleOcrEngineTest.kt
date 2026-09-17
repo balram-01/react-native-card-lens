@@ -77,4 +77,48 @@ class PaddleOcrEngineTest {
         assertTrue(expandedRight > maxX)
         assertEquals(136, expandedRight - expandedLeft)
     }
+
+    @Test
+    fun `test script resolution and multi-language endpoints`() {
+        assertEquals("devanagari", PaddleOcrModelManager.resolveScriptForLanguage("mr"))
+        assertEquals("devanagari", PaddleOcrModelManager.resolveScriptForLanguage("marathi"))
+        assertEquals("devanagari", PaddleOcrModelManager.resolveScriptForLanguage("hi"))
+        assertEquals("latin", PaddleOcrModelManager.resolveScriptForLanguage("en"))
+        assertEquals("latin", PaddleOcrModelManager.resolveScriptForLanguage("fr"))
+        assertEquals("arabic", PaddleOcrModelManager.resolveScriptForLanguage("ar"))
+        assertEquals("cyrillic", PaddleOcrModelManager.resolveScriptForLanguage("ru"))
+        assertEquals("ch", PaddleOcrModelManager.resolveScriptForLanguage("zh"))
+        assertEquals("tamil", PaddleOcrModelManager.resolveScriptForLanguage("ta"))
+        assertEquals("telugu", PaddleOcrModelManager.resolveScriptForLanguage("te"))
+
+        assertTrue(PaddleOcrModelManager.getDefaultRecModelUrl("mr").contains("hindi/rec.onnx"))
+        assertTrue(PaddleOcrModelManager.getDefaultKeysUrl("mr").contains("hindi/dict.txt"))
+
+        assertTrue(PaddleOcrModelManager.getDefaultRecModelUrl("latin").contains("latin/rec.onnx"))
+        assertTrue(PaddleOcrModelManager.getDefaultKeysUrl("latin").contains("latin/dict.txt"))
+    }
+
+    @Test
+    fun `test logo hallucinations and non-text noise filtering`() {
+        val engine = PaddleOcrEngine
+        val normalBox = android.graphics.Rect(10, 10, 200, 40) // W=190, H=30 (typical text line)
+        val squareBox = android.graphics.Rect(50, 50, 250, 250) // W=200, H=200 (square logo)
+        val imageW = 1000
+        val imageH = 600
+
+        // Real text should be accepted
+        assertTrue(engine.isValidTextLine("साहु मोटर्स", 0.85f, normalBox, imageW, imageH))
+        assertTrue(engine.isValidTextLine("Mob. 8888832104", 0.90f, normalBox, imageW, imageH))
+        assertTrue(engine.isValidTextLine("MAYURI", 0.95f, normalBox, imageW, imageH))
+
+        // Pure symbol noise or logo hallucinations should be rejected
+        org.junit.Assert.assertFalse(engine.isValidTextLine("~|*", 0.20f, normalBox, imageW, imageH))
+        org.junit.Assert.assertFalse(engine.isValidTextLine("©", 0.15f, normalBox, imageW, imageH))
+        org.junit.Assert.assertFalse(engine.isValidTextLine("///", 0.30f, normalBox, imageW, imageH))
+        org.junit.Assert.assertFalse(engine.isValidTextLine("■", 0.40f, normalBox, imageW, imageH))
+
+        // Low confidence tiny noise should be rejected
+        org.junit.Assert.assertFalse(engine.isValidTextLine("ab", 0.20f, normalBox, imageW, imageH))
+    }
 }
+

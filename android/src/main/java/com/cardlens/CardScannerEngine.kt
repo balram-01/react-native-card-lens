@@ -294,17 +294,34 @@ object CardScannerEngine {
         val result = mutableListOf<String>()
         val seen = mutableSetOf<String>()
 
-        // 1. Add Devanagari lines that have Devanagari characters
+        // 1. Add all Devanagari pass lines (which already recognize both Devanagari script and digits)
         devLines.forEach { line ->
-            if (ScriptDetector.hasDevanagariCodepoints(line)) {
-                if (seen.add(line)) result.add(line)
-            }
+            if (seen.add(line)) result.add(line)
         }
 
-        // 2. Add Latin lines (contains emails, websites, phones, English text)
+        // 2. Add Latin lines ONLY if they provide real Latin metadata (email, website, GSTIN, legitimate English)
+        // and are NOT status bar noise or garbled Latin hallucinations from scanning Devanagari glyphs
+        val statusBarRegex = Regex("(?i).*\\d{1,2}:\\d{2}.*(?:KB/s|MB/s|\\d+%).*|.*\\d+\\s*(?:KB|MB)/s.*|.*\\b(?:VoLTE|4G|5G|LTE)\\b.*")
         latinLines.forEach { line ->
-            if (seen.add(line)) {
-                result.add(line)
+            val isStatusBar = statusBarRegex.matches(line) || line.contains("KB/s", ignoreCase = true)
+            // Check for gibberish symbols (e.g. "HL.CEO499029R, CEOY9909€, asuldt")
+            val symbolCount = line.count { !it.isLetterOrDigit() && it !in " .@-_/,:()[]" }
+            val isGarbled = symbolCount > 2 || (line.length > 8 && line.count { it in "€$#%^*+=~`|<>" } > 0)
+
+            if (!isStatusBar && !isGarbled) {
+                val hasEmail = line.contains("@")
+                val hasWeb = line.contains("www.", ignoreCase = true) || line.contains("http", ignoreCase = true)
+                val hasGstin = FieldExtractor.extractGstin(line).isNotEmpty()
+                val hasPhone = FieldExtractor.extractPhoneNumbers(line).isNotEmpty()
+                val isLegitEnglish = line.split(Regex("\\s+")).all { word ->
+                    word.length > 1 && word.all { c -> c.isLetter() || c == '.' }
+                }
+
+                if (hasEmail || hasWeb || hasGstin || hasPhone || isLegitEnglish) {
+                    if (seen.add(line)) {
+                        result.add(line)
+                    }
+                }
             }
         }
 

@@ -89,3 +89,7 @@ nitrogen/
 example/dist/
 example/android/app/src/main/assets/ggml-hexagon/
 example/android/app/src/main/assets/index.android.bundle
+
+# Python
+__pycache__/
+*.pyc

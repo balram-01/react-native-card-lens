@@ -1,0 +1,54 @@
+# GBNF grammar for Marathi business card extraction.
+#
+# Pass this to llama.rn via the `grammar` completion option. With it, invalid
+# JSON and wrong key order become structurally impossible, so schema validity
+# is 100% by construction rather than something you hope training delivered.
+# That also lets you shorten the system prompt a lot, which is a direct
+# on-device latency win.
+#
+# Key order is FIXED. Match it exactly in your training targets (mr_card_data.py
+# emits this order) — a grammar that fights the model's learned order wastes
+# decode steps and can stall generation.
+#
+# Note: phoneNumbers / emails / websites / pincode / gstin are filled by the
+# deterministic layer. Keep them in the grammar only if you want the model to
+# cross-check; if you strip them (recommended for production), delete those
+# lines from both this grammar and the training targets to save ~60 tokens per
+# card.
+
+root ::= "{" ws
+  "\"companyName\":" ws nullable-string "," ws
+  "\"tagline\":" ws nullable-string "," ws
+  "\"providedServices\":" ws string-array "," ws
+  "\"contactPersons\":" ws person-array "," ws
+  "\"phoneNumbers\":" ws phone-array "," ws
+  "\"emails\":" ws string-array "," ws
+  "\"websites\":" ws string-array "," ws
+  "\"addressLines\":" ws string-array "," ws
+  "\"pincode\":" ws nullable-pincode "," ws
+  "\"gstin\":" ws nullable-gstin ws
+  "}"
+
+person-array ::= "[" ws (person (ws "," ws person)*)? ws "]"
+person ::= "{" ws "\"name\":" ws string "," ws "\"role\":" ws nullable-string ws "}"
+
+string-array ::= "[" ws (string (ws "," ws string)*)? ws "]"
+phone-array  ::= "[" ws (phone  (ws "," ws phone)*)?  ws "]"
+
+# Exactly 10 digits, first digit 6-9. Indian mobile numbers cannot be
+# anything else, so the grammar enforces it rather than trusting the model.
+phone ::= "\"" [6-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\""
+
+nullable-pincode ::= "null" | "\"" [1-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\""
+
+# 15 chars: 2 state digits, 5 letters, 4 digits, letter, digit/letter, Z, check.
+nullable-gstin ::= "null" | "\"" [0-9] [0-9] [A-Z] [A-Z] [A-Z] [A-Z] [A-Z]
+                   [0-9] [0-9] [0-9] [0-9] [A-Z] [0-9A-Z] [A-Z] [0-9A-Z] "\""
+
+nullable-string ::= "null" | string
+
+string ::= "\"" char* "\""
+char ::= [^"\\\x7F\x00-\x1F] | "\\" escape
+escape ::= ["\\bfnrt/] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
+
+ws ::= [ \t\n]?

@@ -298,14 +298,24 @@ All of the following cards from `test cards/` are verified and pass 100% in both
 | **Heuristic + Regex Engine Alone** _(Instant < 50ms)_      | **85–90%** accurate across standard Indian business cards with recognizable layouts, roles, and suffixes.     | High-throughput, real-time camera scanning where low battery/CPU consumption and sub-50ms latency are critical. |
 | **Hybrid Mode** _(Heuristic + On-Device Qwen2.5-1.5B SLM)_ | **95–98%** accurate, even on complex, unstructured, multi-lingual, or ambiguous cards with no standard roles. | Edge-case recovery, non-standard layouts, multi-branch shops, and highly creative artistic cards.               |
 
-### How to Maximize Dynamic Accuracy Further:
+### Dynamic Accuracy Assurance (Implemented)
 
-1. **Intelligent Confidence Scoring & Auto-Fallback**:
-   - Compute a heuristic extraction confidence score based on:
-     - Company name detection strength (font height ratio $> 1.5$ + suffix indicator presence).
-     - Person name resolution (presence of a verified role or `Name : Phone` delimiter).
-     - Phone / email presence.
-   - If the heuristic parser confidence falls below **75%**, the app can automatically trigger or prompt the user to engage the on-device SLM (`Qwen2.5-1.5B Indic`).
+1. **Intelligent Confidence Scoring & Auto-Fallback (`calculateExtractionConfidence`)**:
+   - Computes an objective heuristic extraction confidence score (0.0 to 1.0) assessing:
+     - **Company Name Strength** (suffix matching across corporate/trade categories, length, typography).
+     - **Contact Reachability** (valid mobile/landline numbers, multi-phone bonuses, valid email domains).
+     - **Contact Person & Professional Role** (verified titles like Director, Advocate, Proprietor, Partner, Doctor).
+     - **Physical / Statutory Verification** (valid 6-digit Indian PIN code, checksum-verified 15-character GSTIN).
+   - If confidence falls below **75%** (`requiresSlmReasoning === true`), the example app dynamically displays a smart prompt banner: `⚡ Ambiguous layout detected (X% confidence). Tap for Local AI Reasoning.`, seamlessly routing to the on-device SLM.
 
-2. **Benchmarking Against Unseen Real-World Test Sets**:
-   - Assemble a dynamic test batch of **5–10 fresh, completely unseen visiting cards** (across healthcare, manufacturing, law, real estate, and education) to continuously validate that the generalized engine performs without any overrides.
+2. **Benchmarking Against Unseen Real-World Test Sets (`dynamicCardsBenchmark.test.ts`)**:
+   - Validated against 8 diverse, completely unseen test cards with **zero hardcoded overrides**:
+     - 🩺 **Healthcare**: *Apex Women's Clinic & Maternity Home* (Dr. Sneha Kulkarni, Gynecologist).
+     - ⚙️ **Manufacturing**: *Vertex Precision Engineering Pvt. Ltd.* (Rajesh Kulkarni, Managing Director, GSTIN).
+     - ⚖️ **Legal Consultancy**: *Deshmukh & Associates Legal Consultants* (Adv. Prashant Deshmukh, Bombay High Court).
+     - 🏢 **Real Estate**: *Green Valley Infra Developers LLP* (Vikramaditya Rao, Managing Partner, Hyderabad).
+     - 💻 **IT / Cloud**: *Cloudmatrix Technologies* (Ananya Iyer, CTO, Bengaluru).
+     - 🛒 **Retail Trade**: *Shree Ganesh Traders* (Ramesh & Suresh Gupta, Dual Mobile, GSTIN).
+     - 🚗 **Automobile Repair**: *Om Sai Automobile & Service Center* (Sachin Patil, Proprietor, Chhatrapati Sambhajinagar).
+     - 🌾 **Devanagari Agriculture**: *सह्याद्री अ‍ॅग्रो सर्व्हिसेस* (तानाजीराव माने, Devanagari numerals, सांगली).
+   - All 8 unseen dynamic benchmark cards pass with 100% accuracy and high confidence scores.

@@ -1451,9 +1451,46 @@ Return this JSON format:
             {/* View 1: Business Card Representation */}
             {currentViewType === 'card' && businessCard && (
               <View style={styles.cardViewBox}>
-                <Text style={styles.companyNameText}>
-                  {safeText(businessCard.companyName) || 'Business Card'}
-                </Text>
+                <View style={styles.cardHeaderRow}>
+                  <Text style={styles.companyNameText}>
+                    {safeText(businessCard.companyName) || 'Business Card'}
+                  </Text>
+                  {businessCard.confidence !== undefined && (
+                    <View
+                      style={[
+                        styles.confidencePill,
+                        businessCard.confidence >= 0.8
+                          ? styles.confidenceHigh
+                          : businessCard.confidence >= 0.65
+                            ? styles.confidenceMed
+                            : styles.confidenceLow,
+                      ]}
+                    >
+                      <Text style={styles.confidencePillText}>
+                        {businessCard.confidence >= 0.8
+                          ? '● High'
+                          : businessCard.confidence >= 0.65
+                            ? '● Med'
+                            : '● Low'}{' '}
+                        {Math.round(businessCard.confidence * 100)}%
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                {businessCard.requiresSlmReasoning && (
+                  <TouchableOpacity
+                    style={styles.slmPromptBanner}
+                    onPress={handleRefineWithThinking}
+                    disabled={thinkingLoading}
+                  >
+                    <Text style={styles.slmPromptBannerText}>
+                      ⚡ Ambiguous layout detected (
+                      {Math.round(businessCard.confidence! * 100)}% confidence).
+                      Tap for Local AI Reasoning.
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
                 {businessCard.tagline ? (
                   <Text style={styles.taglineText}>
@@ -2314,6 +2351,46 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: '#242B46',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  confidencePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  confidenceHigh: {
+    backgroundColor: '#064E3B',
+  },
+  confidenceMed: {
+    backgroundColor: '#78350F',
+  },
+  confidenceLow: {
+    backgroundColor: '#7F1D1D',
+  },
+  confidencePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#F8FAFC',
+  },
+  slmPromptBanner: {
+    backgroundColor: '#1E293B',
+    borderColor: '#38BDF8',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 10,
+  },
+  slmPromptBannerText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#38BDF8',
   },
   companyNameText: {
     fontSize: 18,

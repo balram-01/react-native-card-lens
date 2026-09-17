@@ -1,4 +1,4 @@
-import type { BusinessCard, BillDocument } from './types';
+import type { BusinessCard, BillDocument, ConfidenceAssessment } from './types';
 
 /**
  * GBNF (GGML Backus-Naur Form) grammar strictly constraining model token sampling
@@ -1459,6 +1459,108 @@ export const NON_PERSON_KEYWORDS: Set<string> = new Set([
   'लग्नकार्यासाठी',
 ]);
 
+export const TRADE_CATEGORIES: string[] = [
+  'स्टील',
+  'स्टिल',
+  'फर्निचर',
+  'इलेक्ट्रॉनिक्स',
+  'इलेक्ट्रॉनिक',
+  'मोटर्स',
+  'ऑटोमोबाईल्स',
+  'ऑटो',
+  'ट्रेडर्स',
+  'एंटरप्रायझेस',
+  'एजन्सी',
+  'उद्योग',
+  'डेअरी',
+  'साडी सेंटर',
+  'वस्त्रनिकेतन',
+  'ज्वेलर्स',
+  'हॉटेल',
+  'कॅफे',
+  'बेकरी',
+  'हॉस्पिटल',
+  'क्लिनिक',
+  'गॅरेज',
+  'सर्व्हिसेस',
+  'सॉल्युशन्स',
+  'कन्स्ट्रक्शन',
+  'डेव्हलपर्स',
+  'सुपर मार्केट',
+  'प्रोव्हिजन स्टोअर्स',
+  'किराणा',
+  'प्रिंटर्स',
+  'पब्लिकेशन',
+  'पॅकर्स',
+  'सोल्युशन्स',
+  'मल्टिसर्व्हिसेस',
+  'SPORTS',
+  'TELECOM',
+  'SOLUTIONS',
+  'PVT. LTD.',
+  'PVT LTD',
+  'LIMITED',
+  'CONSULTANCY',
+  'ASTROLOGICAL',
+  'MARKETING',
+  'मार्केटींग',
+  'सेल्स',
+  'फॅशन साडी',
+  'फॅशन',
+  'CAKES',
+  'BAKERY',
+  'CLINIC',
+  'HOSPITAL',
+  'MATERNITY',
+  'HEALTHCARE',
+  'DIAGNOSTIC',
+  'PHARMA',
+  'PHARMACEUTICALS',
+  'ENGINEERING',
+  'MANUFACTURING',
+  'MANUFACTURERS',
+  'INDUSTRIES',
+  'INDUSTRY',
+  'ENTERPRISES',
+  'TRADERS',
+  'TRADING',
+  'TECHNOLOGIES',
+  'TECH',
+  'INFRA',
+  'DEVELOPERS',
+  'BUILDERS',
+  'CONSTRUCTION',
+  'ASSOCIATES',
+  'CONSULTANTS',
+  'CONSULTING',
+  'LEGAL',
+  'ADVOCATE',
+  'AUTO',
+  'CARE',
+  'SERVICE',
+  'SERVICES',
+  'MOTORS',
+  'GARAGE',
+  'LABS',
+  'LABORATORIES',
+  'SYSTEMS',
+  'VENTURES',
+  'HOLDINGS',
+  'FOODS',
+  'FOOD',
+  'PRODUCTS',
+  'GRAINS',
+  'SPICES',
+  'AGRO',
+  'AGENCY',
+  'COMMUNICATIONS',
+  'ELECTRICALS',
+  'ELECTRONICS',
+  'ELECTRICAL',
+  'STEEL',
+  'FURNITURE',
+];
+
 export function isValidPersonCandidate(name: string): boolean {
   if (!name || typeof name !== 'string') return false;
   const clean = name.trim();
@@ -1713,19 +1815,32 @@ export function runLocalSemanticExtraction(
     }
   }
 
-  // 2b. Explicit Name prefixes e.g. "Mr. Rajesh T. Bokade" / "Mr. Raicsh T. Bokade"
+  // 2b. Explicit Name prefixes e.g. "Mr. Rajesh T. Bokade" / "Adv. Prashant Deshmukh"
   for (const line of lines) {
-    const mrMatch = line.match(/^(?:Mr\.|Shri|Dr\.|Prof\.)\s+([A-Za-z\s.]+)/i);
+    const mrMatch = line.match(
+      /^(?:Mr\.|Shri\b|Dr\.|Prof\.|Adv\.)\s+([A-Za-z\s.]+)/i
+    );
     if (mrMatch && mrMatch[0]) {
       const pName = mrMatch[0].trim();
+      const upper = pName.toUpperCase();
+      const isBusiness =
+        /TRADERS|PVT|LTD|LIMITED|INDUSTRIES|ENTERPRISES|CLINIC|HOSPITAL|MOTORS|TELECOM|SPORTS|SOLUTIONS|AGENCY|INFRA|TECHNOLOGIES|ASSOCIATES/i.test(
+          upper
+        ) || TRADE_CATEGORIES.some((cat) => upper.includes(cat.toUpperCase()));
       if (
         pName.length > 5 &&
+        !isBusiness &&
         isValidPersonCandidate(pName) &&
         !refinedPersons.some(
           (p) => p.name.toLowerCase() === pName.toLowerCase()
         )
       ) {
-        refinedPersons.push({ name: pName, role: 'Contact Person' });
+        const role = /Adv\./i.test(pName)
+          ? 'Advocate'
+          : /Dr\./i.test(pName)
+            ? 'Doctor'
+            : 'Contact Person';
+        refinedPersons.push({ name: pName, role });
       }
     }
   }
@@ -1734,11 +1849,13 @@ export function runLocalSemanticExtraction(
   if (refinedPersons.length === 0) {
     for (const line of lines) {
       const isAllCapsName = /^[A-Z]{3,}(?:\s+[A-Z]{3,}){1,2}$/.test(line);
-      const isNotBusiness =
-        !/SPORTS|MOTORS|TELECOM|SOLUTIONS|PVT|LTD|COMPANY|LIMITED|SHOP|ROAD|NAGPUR|MEMBER|PATIENT/i.test(
+      const upper = line.toUpperCase();
+      const isBusiness =
+        TRADE_CATEGORIES.some((cat) => upper.includes(cat.toUpperCase())) ||
+        /SPORTS|MOTORS|TELECOM|SOLUTIONS|PVT|LTD|COMPANY|LIMITED|SHOP|ROAD|NAGPUR|MEMBER|PATIENT|TRADERS|ENTERPRISES|INDUSTRIES|ASSOCIATES|SERVICES|AGENCY|AGENCIES|DISTRIBUTORS|STORE|STORES|ELECTRONICS|ELECTRICALS|HARDWARE|JEWELLERS/i.test(
           line
         );
-      if (isAllCapsName && isNotBusiness && isValidPersonCandidate(line)) {
+      if (isAllCapsName && !isBusiness && isValidPersonCandidate(line)) {
         refinedPersons.push({ name: line.trim(), role: 'Proprietor' });
         break;
       }
@@ -1761,8 +1878,10 @@ export function runLocalSemanticExtraction(
         cleanLine
       );
 
+      const upper = cleanLine.toUpperCase();
       const hasBusiness =
-        /स्टील|स्टिल|फर्निचर|इलेक्ट्रॉनिक्स|मोटर्स|ऑटो|ट्रेडर्स|उद्योग|डेअरी|कंपनी|दुकान|शॉप|road|chowk|nagar|मराठी|sports|telecom|solutions/i.test(
+        TRADE_CATEGORIES.some((cat) => upper.includes(cat.toUpperCase())) ||
+        /स्टील|स्टिल|फर्निचर|इलेक्ट्रॉनिक्स|मोटर्स|ऑटो|ट्रेडर्स|उद्योग|डेअरी|कंपनी|दुकान|शॉप|एजन्सी|ऍग्रो|खते|बियाणे|road|chowk|nagar|मराठी|sports|telecom|solutions/i.test(
           cleanLine
         );
       const hasLocation =
@@ -1850,60 +1969,6 @@ export function runLocalSemanticExtraction(
 
   const fullText = lines.join(' ');
 
-  // Universal Marathi & Indic Trade Categories
-  const TRADE_CATEGORIES = [
-    'स्टील',
-    'स्टिल',
-    'फर्निचर',
-    'इलेक्ट्रॉनिक्स',
-    'इलेक्ट्रॉनिक',
-    'मोटर्स',
-    'ऑटोमोबाईल्स',
-    'ऑटो',
-    'ट्रेडर्स',
-    'एंटरप्रायझेस',
-    'एजन्सी',
-    'उद्योग',
-    'डेअरी',
-    'साडी सेंटर',
-    'वस्त्रनिकेतन',
-    'ज्वेलर्स',
-    'हॉटेल',
-    'कॅफे',
-    'बेकरी',
-    'हॉस्पिटल',
-    'क्लिनिक',
-    'गॅरेज',
-    'सर्व्हिसेस',
-    'सॉल्युशन्स',
-    'कन्स्ट्रक्शन',
-    'डेव्हलपर्स',
-    'सुपर मार्केट',
-    'प्रोव्हिजन स्टोअर्स',
-    'किराणा',
-    'प्रिंटर्स',
-    'पब्लिकेशन',
-    'पॅकर्स',
-    'सोल्युशन्स',
-    'मल्टिसर्व्हिसेस',
-    'SPORTS',
-    'TELECOM',
-    'SOLUTIONS',
-    'PVT. LTD.',
-    'PVT LTD',
-    'LIMITED',
-    'CONSULTANCY',
-    'ASTROLOGICAL',
-    'MARKETING',
-    'मार्केटींग',
-    'सेल्स',
-    'फॅशन साडी',
-    'फॅशन',
-    'साडी',
-    'CAKES',
-    'BAKERY',
-  ];
-
   // Specific OCR typo healing (e.g. Shahu Motors test card)
   if (
     /साहु\s*मोटसी/u.test(fullText) ||
@@ -1948,40 +2013,57 @@ export function runLocalSemanticExtraction(
     healedCompany = 'गुरुगोविंद सिंग फॅशन साडी';
   } else if (!healedCompany) {
     // Universal Company Detection:
-    // Look for lines containing trade categories (e.g. "स्टील, फर्निचर अॅन्ड इलेक्ट्रॉनिक्स")
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
+      const upper = line.toUpperCase();
       const hasCat = TRADE_CATEGORIES.some((cat) =>
-        line.toUpperCase().includes(cat.toUpperCase())
+        upper.includes(cat.toUpperCase())
       );
       if (
         hasCat &&
         !line.includes('आमच्याकडे') &&
         !line.includes('लागणाऱ्या') &&
-        !line.includes('होलसेल')
+        !line.includes('होलसेल') &&
+        !line.includes('@') &&
+        !line.startsWith('http') &&
+        !line.startsWith('www.') &&
+        !line.match(
+          /^(?:Tel|Mob|Phone|Email|GSTIN|Works|Office|Chamber|Corporate|Plot|Shop|Road|Plot No)/i
+        ) &&
+        !line.match(
+          /^(?:Advocate|Adv\.|Director|Proprietor|Managing|CEO|Founder|Whole\s*Seller|Wholesaler|Retailer|Manufacturer\s+of|Dealers\s+in|All\s+types|All\s+kinds|Specializing\s+in)/i
+        ) &&
+        !refinedPersons.some((p) => p.name.toLowerCase() === line.toLowerCase())
       ) {
-        // If previous line is a short brand name (e.g. "वैष्णवी"), merge them
+        // If line starts with a trade category and previous line is a brand name (e.g. "वैष्णवी"), merge them
         if (i > 0) {
           const prev = lines[i - 1]!.trim();
           const isNotPerson = !refinedPersons.some((p) => p.name === prev);
-          const isNotPhone = !prev.match(/मो\.|ph|tel|\d{5}/i);
+          const isNotPhone = !prev.match(/मो\.|ph|tel|\d{3}/i);
           const isNotInvocation =
             !prev.includes('प्रसन्न') &&
             !prev.includes('श्री') &&
             !prev.includes('एक');
           const isNotService = !prev.includes('आमच्याकडे');
+          const isNotMetadata = !prev.match(/reg|no\.|lic|gst|vat|email|www/i);
+          const lineStartsWithCategory = TRADE_CATEGORIES.some((cat) =>
+            line.toLowerCase().startsWith(cat.toLowerCase())
+          );
           if (
+            lineStartsWithCategory &&
             prev.length >= 2 &&
             prev.length <= 25 &&
             isNotPerson &&
             isNotPhone &&
             isNotInvocation &&
-            isNotService
+            isNotService &&
+            isNotMetadata
           ) {
             healedCompany = `${prev} ${line}`.trim();
             break;
           }
         }
+
         healedCompany = line;
         break;
       }
@@ -2325,7 +2407,10 @@ export function extractDeterministicUniversal(
   );
   for (const m of gstinMatches) {
     if (m.index != null && !overlaps(m.index, m.index + m[0].length)) {
-      if (verifyGstinChecksum(m[1]!)) {
+      const prefix = norm
+        .substring(Math.max(0, m.index - 10), m.index)
+        .toUpperCase();
+      if (verifyGstinChecksum(m[1]!) || prefix.includes('GST')) {
         gstin = m[1]!;
         spans.push([m.index, m.index + m[0].length]);
       }
@@ -2454,7 +2539,7 @@ export function extractHybridUniversalCard(
   const parsed = runLocalSemanticExtraction(healedResidual, baseCard);
 
   // Merge: deterministic fields always override
-  return {
+  const mergedCard: BusinessCard = {
     ...parsed,
     phoneNumbers:
       det.phoneNumbers.length > 0 ? det.phoneNumbers : parsed.phoneNumbers,
@@ -2462,6 +2547,126 @@ export function extractHybridUniversalCard(
     websites: det.websites.length > 0 ? det.websites : parsed.websites,
     pincode: det.pincode || parsed.pincode,
     gstin: det.gstin || parsed.gstin,
+  };
+
+  const assessment = calculateExtractionConfidence(mergedCard);
+  mergedCard.confidence = assessment.confidence;
+  mergedCard.requiresSlmReasoning = assessment.requiresSlmReasoning;
+
+  return mergedCard;
+}
+
+/**
+ * Computes an objective heuristic extraction confidence score (0.0 to 1.0)
+ * and determines if on-device SLM deep reasoning is recommended.
+ */
+export function calculateExtractionConfidence(
+  card: Partial<BusinessCard>
+): ConfidenceAssessment {
+  let score = 0;
+  const reasons: string[] = [];
+
+  // 1. Company Name Strength (up to 30 points)
+  if (card.companyName && card.companyName.trim().length >= 3) {
+    score += 15;
+    const upper = card.companyName.toUpperCase();
+    const hasSuffix = [
+      'LTD',
+      'PVT',
+      'LIMITED',
+      'INC',
+      'CORP',
+      'INDUSTRIES',
+      'ENTERPRISES',
+      'TRADERS',
+      'SOLUTIONS',
+      'SERVICES',
+      'SYSTEMS',
+      'TECHNOLOGIES',
+      'MOTORS',
+      'CLINIC',
+      'HOSPITAL',
+      'PHARMA',
+      'AGENCY',
+      'VENTURES',
+      'LLP',
+      'प्रा. लि.',
+      'प्रा.लि.',
+      'ट्रेडर्स',
+      'उद्योग',
+      'स्टील',
+      'फर्निचर',
+      'इलेक्ट्रॉनिक्स',
+      'सेल्स',
+      'MARKETING',
+      'मार्केटिंग',
+      'मार्केटींग',
+      'CENTRE',
+      'CENTER',
+      'ACADEMY',
+    ].some((s) => upper.includes(s));
+    if (hasSuffix) {
+      score += 15;
+    } else if (card.companyName.trim().length >= 6) {
+      score += 10;
+    }
+  } else {
+    reasons.push('Company name is missing or ambiguous');
+  }
+
+  // 2. Contact Reachability (up to 35 points)
+  if (card.phoneNumbers && card.phoneNumbers.length > 0) {
+    score += 20;
+    if (card.phoneNumbers.length > 1) score += 5; // Multi-phone bonus
+  } else {
+    reasons.push('No valid phone number detected');
+  }
+
+  if (card.emails && card.emails.length > 0) {
+    score += 10;
+  }
+
+  // 3. Contact Person & Professional Role (up to 20 points)
+  if (card.contactPersons && card.contactPersons.length > 0) {
+    const validPerson = card.contactPersons.find(
+      (p) => p.name && p.name.trim().length >= 3
+    );
+    if (validPerson) {
+      score += 12;
+      if (validPerson.role && validPerson.role.trim().length > 0) {
+        score += 8; // Verified role bonus
+      }
+    }
+  } else {
+    if (!card.companyName) {
+      reasons.push('Neither person nor company identified with confidence');
+    }
+  }
+
+  // 4. Physical / Statutory Verification (up to 15 points)
+  if (card.addressLines && card.addressLines.length > 0) {
+    score += 8;
+  }
+  if (card.pincode && /^[1-9]\d{5}$/.test(card.pincode)) {
+    score += 4;
+  }
+  if (
+    card.gstin &&
+    /^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(card.gstin)
+  ) {
+    score += 3;
+  }
+
+  const confidence = Math.min(
+    1.0,
+    Math.max(0.1, Math.round((score / 100) * 100) / 100)
+  );
+  const requiresSlmReasoning = confidence < 0.75 || reasons.length >= 2;
+
+  return {
+    confidence,
+    requiresSlmReasoning,
+    reasons,
   };
 }
 

@@ -59,6 +59,7 @@ export type {
   ScanCardOptions,
   ScanDocumentOptions,
   ScanBillOptions,
+  ConfidenceAssessment,
 } from './types';
 
 export {
@@ -533,6 +534,7 @@ export {
   extractDeterministicUniversal,
   extractHybridMarathiCard,
   extractHybridUniversalCard,
+  calculateExtractionConfidence,
   parseFallbackLocalBill,
   enhanceBillWithLocalLLM,
 } from './LocalCardLLM';

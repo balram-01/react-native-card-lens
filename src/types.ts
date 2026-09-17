@@ -484,6 +484,21 @@ export interface BusinessCard {
   gstin?: string;
   qrCodeData?: string;
   rawText: string;
+  /**
+   * Overall extraction confidence score (0.0 to 1.0, e.g. 0.85 = 85%).
+   */
+  confidence?: number;
+  /**
+   * True if heuristic confidence is < 0.75 or key fields are ambiguous,
+   * indicating that on-device SLM deep reasoning is recommended.
+   */
+  requiresSlmReasoning?: boolean;
+}
+
+export interface ConfidenceAssessment {
+  confidence: number;
+  requiresSlmReasoning: boolean;
+  reasons: string[];
 }
 
 // ─── Bill & Invoice Documents (Phase 5) ──────────────────────────────────────

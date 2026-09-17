@@ -44,7 +44,7 @@ object CardLayoutParser {
         "फर्निचर", "इलेक्ट्रॉनिक्स", "इलेक्ट्रॉनिक", "स्टील", "स्टिल",
         "ऑटोमोबाईल्स", "वस्त्रनिकेतन", "साडी सेंटर", "साडी", "फॅशन साडी", "फॅशन", "ज्वेलर्स",
         // English — specific entity suffixes (multi-word first to avoid partial matches)
-        "PVT. LTD.", "PVT LTD", "PVT. LTD", "LTD.", "LIMITED",
+        "PVT. LTD.", "PVT LTD", "PVT. LTD", "LTD.", "LTD", "LIMITED",
         "ENTERPRISES", "TRADERS", "MARKETING", "INDUSTRIES",
         "DEVELOPERS", "SOLUTIONS", "SYSTEMS", "TECHNOLOGIES",
         "VENTURES", "HOLDINGS", "INTERNATIONAL", "BROTHERS", "BROS.",
@@ -198,6 +198,36 @@ object CardLayoutParser {
         "सेल्स", "सर्व्हिस", "स्पेअर्स", "विक्रेते", "उत्पादक", "दुरुस्ती",
         "ई-रिक्षा", "ई-बाईक", "रिक्षा", "बाईक", "दुकान",
         "होलसेल", "होलसेल दरात", "मिळतील", "कम्पलीट", "कम्प्लीट", "फॅमिली शॉप"
+    )
+
+    // Keywords for goods, digital badges, astrology tokens, and words that must NEVER be person names
+    val NON_PERSON_KEYWORDS: Set<String> = setOf(
+        // Digital badges, stores & app download instructions
+        "app store", "google play", "play store", "download", "scan", "qr", "qr code", "code", "app", "apps",
+        "get it on", "dowrod", "from", "app from", "click here", "scan qr", "scan qr code", "ios", "android",
+        "get it", "on the",
+        // Astrology, Zodiac, Planets & Vedic Rituals
+        "राशि", "राशी", "कुंडली", "मकर", "वृश्चिक", "धनु", "तुला", "मेष", "वृषभ", "मिथुन", "कर्क", "सिंह", "कन्या", "कुंभ", "मीन",
+        "सूर्य", "सुर्य", "चंद्र", "मंगल", "बुध", "गुरु", "शुक्र", "शनि", "राहु", "केतु", "बृहस्पति", "ग्रह", "नक्षत्र", "पूजा", "हवन", "rituals",
+        "zodiac", "horoscope", "astrology", "numerology", "tarot", "healing", "vastu", "gemstones", "gems", "stone", "stones", "consultancy",
+        "vedic astrology", "astro numerology", "puja rituals", "rashidham",
+        // Sports, merchandise, industrial
+        "carrom", "carron", "board", "cricket", "bat", "ball", "tennis", "badminton", "football",
+        "volleyball", "basketball", "racket", "shuttle", "shuttlecock", "trophy", "trophies",
+        "fitness", "gym", "sports", "sport", "goods", "equipment", "spares", "parts", "hardware",
+        "tools", "bearings", "chemicals", "paints", "pipes", "fittings", "valves", "motors", "pumps",
+        "machinery", "cables", "wires", "garments", "clothing", "textiles", "fabrics", "saree",
+        "shoes", "footwear", "furniture", "jewellery", "jewelry", "mobiles", "stationery", "books",
+        "toys", "sweets", "bakery", "dairy", "grocery", "medical", "surgical", "pharma", "e-rickshaw",
+        "e-bike", "rickshaw", "bike", "sales", "service", "retailer", "wholesaler", "dealer", "distributor",
+        // Address & Building
+        "appartment", "apartment", "complex", "chambers", "plaza", "square", "road", "street",
+        "lane", "octroi", "naka", "putla", "pass", "under pass", "layout", "colony", "nagar",
+        "market", "bazaar", "center", "centre", "tower", "building", "bldg", "floor", "mansions",
+        "palace", "enclave", "plot", "shop", "office", "flat", "outlet", "branch",
+        // Furniture / appliances in Marathi
+        "सोफासेट", "सोफा", "डायनिंग", "टेबल", "कपाट", "फ्रिज", "कुलर", "भांडी", "इलेक्ट्रॉनिक्स", "इलेक्ट्रॉनिक",
+        "फर्निचर", "स्टील", "स्टिल", "होलसेल", "पेट्रोलपंप", "पेट्रोलपंपा", "शेजारी", "माहेरघर", "वस्तु", "बस्त्याचे", "लग्नकार्यासाठी"
     )
 
     /**
@@ -566,9 +596,14 @@ object CardLayoutParser {
             if (block.lines.size > 1) {
                 val nonContactLines = block.lines.filter { line ->
                     val t = line.text.trim()
-                    !isContactInfo(t) && !looksLikePureAddress(t) && !isReligiousInvocation(t)
+                    val lower = t.lowercase()
+                    !isContactInfo(t) && !looksLikePureAddress(t) && !isReligiousInvocation(t) &&
+                    !looksLikeProductOrServiceList(t) && t.count { it == ',' } < 2 &&
+                    !TAGLINE_BUSINESS_KEYWORDS.any { lower.contains(it) } &&
+                    !SLOGAN_KEYWORDS.any { lower.contains(it) } &&
+                    !NON_PERSON_KEYWORDS.any { lower.contains(it) }
                 }
-                if (nonContactLines.isNotEmpty() && nonContactLines.size <= 3) {
+                if (nonContactLines.isNotEmpty() && nonContactLines.size <= 2) {
                     nonContactLines.joinToString(" ") { it.text.trim() }
                 } else {
                     val companyLine = block.lines.firstOrNull { hasCompanyIndicator(it.text) }
@@ -1056,9 +1091,13 @@ object CardLayoutParser {
         if (clean.contains(',') || clean.contains("...") || clean.contains("…")) return false
         // Person names don't contain slogan/tagline keywords or company indicators
         val lower = clean.lowercase()
+        if (NON_PERSON_KEYWORDS.any { lower.contains(it) }) return false
+        if (lower.startsWith("download") || lower.startsWith("scan") || lower.startsWith("get it") || lower.startsWith("app")) return false
+        if (lower.contains("राशि") || lower.contains("राशी") || lower.contains("कुंडली") || lower.contains("graha")) return false
         if (SLOGAN_KEYWORDS.any { lower.contains(it) }) return false
         if (TAGLINE_BUSINESS_KEYWORDS.any { lower.contains(it) }) return false
         if (COMPANY_INDICATORS.any { lower.contains(it.lowercase()) }) return false
+        if (hasCompanyIndicator(clean)) return false
         val words = clean.split(Regex("[\\s]+")).filter { it.isNotBlank() }
         if (words.size !in 2..4) return false
         // All words should start with uppercase or be a known initial (e.g. "T.")
@@ -1081,9 +1120,22 @@ object CardLayoutParser {
         return true
     }
 
-    private fun isValidPersonName(text: String, alreadyUsed: Set<String>): Boolean {
+    val CONTACT_LABEL_KEYWORDS: Set<String> = setOf(
+        "tel", "telephone", "phone", "ph", "mob", "mobile", "cell", "off", "office",
+        "res", "residence", "fax", "contact", "email", "mail", "web", "website", "site",
+        "url", "http", "https", "www", "address", "add", "pin", "pincode", "gst", "gstin",
+        "मोबाईल", "मोबाइल", "मो.", "मो", "फोन", "दूरध्वनी", "संपर्क", "पत्ता", "पता", "कार्यालय"
+    )
+
+    fun isValidPersonName(text: String, alreadyUsed: Set<String>): Boolean {
         if (text.isBlank() || alreadyUsed.contains(text)) return false
         if (text.length > 55) return false
+        val lower = text.trim().lowercase()
+        if (CONTACT_LABEL_KEYWORDS.contains(lower)) return false
+        if (NON_PERSON_KEYWORDS.any { lower.contains(it) }) return false
+        if (lower.startsWith("download") || lower.startsWith("scan") || lower.startsWith("get it") || lower.startsWith("app")) return false
+        if (DEFAULT_ROLE_KEYWORDS.any { lower == it.lowercase() }) return false
+        if (isSloganOrTagline(text)) return false
         if (isContactInfo(text)) return false
         if (hasCompanyIndicator(text)) return false
         if (isReligiousInvocation(text)) return false

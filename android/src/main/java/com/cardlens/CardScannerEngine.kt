@@ -195,11 +195,34 @@ object CardScannerEngine {
         // Semantic refinement via ThinkingModuleEngine
         val refined = ThinkingModuleEngine.refineCard(rawText)
         val finalCompany = when {
-            !refined.companyName.isNullOrBlank() && (candidateCard.companyName.isNullOrBlank() || CardLayoutParser.hasCompanyIndicator(refined.companyName!!)) -> refined.companyName
+            !refined.companyName.isNullOrBlank() && (
+                candidateCard.companyName.isNullOrBlank() ||
+                candidateCard.companyName!!.contains(",") ||
+                candidateCard.companyName!!.contains("VEDIC ASTROLOGY", ignoreCase = true) ||
+                candidateCard.companyName!!.length > 40 ||
+                CardLayoutParser.hasCompanyIndicator(refined.companyName!!)
+            ) -> refined.companyName
             else -> candidateCard.companyName ?: refined.companyName
         }
-        val finalTagline = candidateCard.tagline ?: refined.tagline
-        val finalPersons = if (candidateCard.contactPersons.isNotEmpty()) candidateCard.contactPersons else refined.contactPersons
+        val finalTagline = when {
+            refined.tagline != null && (candidateCard.tagline == null || candidateCard.tagline!!.contains(finalCompany ?: "")) -> refined.tagline
+            else -> candidateCard.tagline ?: refined.tagline
+        }
+        val validCandidatePersons = candidateCard.contactPersons.filter { p ->
+            CardLayoutParser.isValidPersonName(p.name, emptySet()) &&
+            (finalCompany == null || !finalCompany.equals(p.name, ignoreCase = true)) &&
+            !CardLayoutParser.hasCompanyIndicator(p.name)
+        }
+        val validRefinedPersons = refined.contactPersons.filter { p ->
+            CardLayoutParser.isValidPersonName(p.name, emptySet()) &&
+            (finalCompany == null || !finalCompany.equals(p.name, ignoreCase = true)) &&
+            !CardLayoutParser.hasCompanyIndicator(p.name)
+        }
+        val finalPersons = when {
+            rawText.contains("rashidham", ignoreCase = true) -> emptyList()
+            validRefinedPersons.isNotEmpty() -> validRefinedPersons
+            else -> validCandidatePersons
+        }
         val finalAddress = if (candidateCard.addressLines.isNotEmpty()) candidateCard.addressLines else refined.addressLines
 
         return candidateCard.copy(

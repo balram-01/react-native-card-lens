@@ -1259,6 +1259,241 @@ export function isLikelyLogoArtifact(line: string): boolean {
   return false;
 }
 
+export const NON_PERSON_KEYWORDS: Set<string> = new Set([
+  // Digital badges, stores & app download instructions
+  'app store',
+  'google play',
+  'play store',
+  'download',
+  'scan',
+  'qr',
+  'qr code',
+  'code',
+  'app',
+  'apps',
+  'get it on',
+  'getit on',
+  'dowrod',
+  'from',
+  'app from',
+  'click here',
+  'scan qr',
+  'scan qr code',
+  'ios',
+  'android',
+  'get it',
+  'on the',
+  // Astrology, Zodiac, Planets & Vedic Rituals
+  'राशि',
+  'राशी',
+  'कुंडली',
+  'मकर',
+  'वृश्चिक',
+  'धनु',
+  'तुला',
+  'मेष',
+  'वृषभ',
+  'मिथुन',
+  'कर्क',
+  'सिंह',
+  'कन्या',
+  'कुंभ',
+  'मीन',
+  'सूर्य',
+  'सुर्य',
+  'चंद्र',
+  'मंगल',
+  'बुध',
+  'गुरु',
+  'शुक्र',
+  'शनि',
+  'राहु',
+  'केतु',
+  'बृहस्पति',
+  'ग्रह',
+  'नक्षत्र',
+  'पूजा',
+  'हवन',
+  'rituals',
+  'zodiac',
+  'horoscope',
+  'astrology',
+  'numerology',
+  'tarot',
+  'healing',
+  'vastu',
+  'gemstones',
+  'gems',
+  'stone',
+  'stones',
+  'consultancy',
+  'vedic astrology',
+  'astro numerology',
+  'puja rituals',
+  'rashidham',
+  // Sports, merchandise, industrial
+  'carrom',
+  'carron',
+  'board',
+  'cricket',
+  'bat',
+  'ball',
+  'tennis',
+  'badminton',
+  'football',
+  'volleyball',
+  'basketball',
+  'racket',
+  'shuttle',
+  'shuttlecock',
+  'trophy',
+  'trophies',
+  'fitness',
+  'gym',
+  'sports',
+  'sport',
+  'goods',
+  'equipment',
+  'spares',
+  'parts',
+  'hardware',
+  'tools',
+  'bearings',
+  'chemicals',
+  'paints',
+  'pipes',
+  'fittings',
+  'valves',
+  'motors',
+  'pumps',
+  'machinery',
+  'cables',
+  'wires',
+  'garments',
+  'clothing',
+  'textiles',
+  'fabrics',
+  'saree',
+  'shoes',
+  'footwear',
+  'furniture',
+  'jewellery',
+  'jewelry',
+  'mobiles',
+  'stationery',
+  'books',
+  'toys',
+  'sweets',
+  'bakery',
+  'dairy',
+  'grocery',
+  'medical',
+  'surgical',
+  'pharma',
+  'e-rickshaw',
+  'e-bike',
+  'rickshaw',
+  'bike',
+  'sales',
+  'service',
+  'retailer',
+  'wholesaler',
+  'dealer',
+  'distributor',
+  // Address & Building
+  'appartment',
+  'apartment',
+  'complex',
+  'chambers',
+  'plaza',
+  'square',
+  'road',
+  'street',
+  'lane',
+  'octroi',
+  'naka',
+  'putla',
+  'pass',
+  'under pass',
+  'layout',
+  'colony',
+  'nagar',
+  'market',
+  'bazaar',
+  'center',
+  'centre',
+  'tower',
+  'building',
+  'bldg',
+  'floor',
+  'mansions',
+  'palace',
+  'enclave',
+  'plot',
+  'shop',
+  'office',
+  'flat',
+  'outlet',
+  'branch',
+  // Furniture / appliances in Marathi
+  'सोफासेट',
+  'सोफा',
+  'डायनिंग',
+  'टेबल',
+  'कपाट',
+  'फ्रिज',
+  'कुलर',
+  'भांडी',
+  'इलेक्ट्रॉनिक्स',
+  'इलेक्ट्रॉनिक',
+  'फर्निचर',
+  'स्टील',
+  'स्टिल',
+  'होलसेल',
+  'पेट्रोलपंप',
+  'पेट्रोलपंपा',
+  'शेजारी',
+  'माहेरघर',
+  'वस्तु',
+  'बस्त्याचे',
+  'लग्नकार्यासाठी',
+]);
+
+export function isValidPersonCandidate(name: string): boolean {
+  if (!name || typeof name !== 'string') return false;
+  const clean = name.trim();
+  if (clean.length < 3 || clean.length > 55) return false;
+  const lower = clean.toLowerCase();
+
+  if (
+    lower.startsWith('download') ||
+    lower.startsWith('scan') ||
+    lower.startsWith('get it') ||
+    lower.startsWith('getit') ||
+    lower.startsWith('app')
+  ) {
+    return false;
+  }
+  for (const kw of NON_PERSON_KEYWORDS) {
+    if (lower.includes(kw)) return false;
+  }
+  if (
+    clean.includes('|') ||
+    clean.includes('/') ||
+    clean.includes(',') ||
+    clean.includes('...') ||
+    clean.includes('…')
+  ) {
+    return false;
+  }
+  const digitCount = (clean.match(/\d/g) || []).length;
+  if (digitCount > 2) return false;
+  const letterCount = (clean.match(/[\p{L}]/gu) || []).length;
+  if (letterCount < 3) return false;
+
+  return true;
+}
+
 export function runLocalSemanticExtraction(
   rawText: string,
   card: BusinessCard
@@ -1355,7 +1590,9 @@ export function runLocalSemanticExtraction(
     'ডাক্তার',
   ];
 
-  let refinedPersons = [...card.contactPersons];
+  let refinedPersons = (card.contactPersons || []).filter((p) =>
+    isValidPersonCandidate(p.name)
+  );
 
   // Check lines for Indic designations like "सचिन मधुकर जोशी (संचालक)" or standalone roles
   for (let i = 0; i < lines.length; i++) {
@@ -1371,7 +1608,11 @@ export function runLocalSemanticExtraction(
       if (inlineMatch && inlineMatch[1] && inlineMatch[2]) {
         const pName = inlineMatch[1].trim();
         const pRole = inlineMatch[2].trim();
-        if (pName.length > 2 && !pName.match(/पत्ता|मोबाईल|फोन|ईमेल|दिनांक/)) {
+        if (
+          pName.length > 2 &&
+          !pName.match(/पत्ता|मोबाईल|फोन|ईमेल|दिनांक/) &&
+          isValidPersonCandidate(pName)
+        ) {
           const exists = refinedPersons.some((p) => p.name === pName);
           if (!exists) {
             refinedPersons.push({ name: pName, role: pRole });
@@ -1388,7 +1629,10 @@ export function runLocalSemanticExtraction(
           if (
             prevLine.length > 2 &&
             prevLine.length < 40 &&
-            !prevLine.match(/पत्ता|मोबाईल|फोन|ईमेल|mob|tel|road|chowk|nagar/i)
+            !prevLine.match(
+              /पत्ता|मोबाईल|फोन|ईमेल|mob|tel|road|chowk|nagar/i
+            ) &&
+            isValidPersonCandidate(prevLine)
           ) {
             const exists = refinedPersons.some((p) => p.name === prevLine);
             if (!exists) {
@@ -1405,7 +1649,10 @@ export function runLocalSemanticExtraction(
       if (lineLower.includes(role)) {
         if (i > 0) {
           const nameCandidate = lines[i - 1]!;
-          if (!nameCandidate.match(/tel|mob|email|www|http|road|nagar|gst/i)) {
+          if (
+            !nameCandidate.match(/tel|mob|email|www|http|road|nagar|gst/i) &&
+            isValidPersonCandidate(nameCandidate)
+          ) {
             const existingIdx = refinedPersons.findIndex(
               (p) => p.name.toLowerCase() === nameCandidate.toLowerCase()
             );
@@ -1446,6 +1693,7 @@ export function runLocalSemanticExtraction(
           pName &&
           pName.length >= 3 &&
           pName.length <= 30 &&
+          isValidPersonCandidate(pName) &&
           !/\b(?:mob|mobile|tel|telephone|phone|ph|cell|off|res|fax|contact)\b|मोबाईल|मोबाइल|मो\.|मो|फोन|दूरध्वनी|संपर्क|पत्ता|पता|कार्यालय|ऑफीस/i.test(
             pName
           ) &&
@@ -1472,6 +1720,7 @@ export function runLocalSemanticExtraction(
       const pName = mrMatch[0].trim();
       if (
         pName.length > 5 &&
+        isValidPersonCandidate(pName) &&
         !refinedPersons.some(
           (p) => p.name.toLowerCase() === pName.toLowerCase()
         )
@@ -1489,7 +1738,7 @@ export function runLocalSemanticExtraction(
         !/SPORTS|MOTORS|TELECOM|SOLUTIONS|PVT|LTD|COMPANY|LIMITED|SHOP|ROAD|NAGPUR|MEMBER|PATIENT/i.test(
           line
         );
-      if (isAllCapsName && isNotBusiness) {
+      if (isAllCapsName && isNotBusiness && isValidPersonCandidate(line)) {
         refinedPersons.push({ name: line.trim(), role: 'Proprietor' });
         break;
       }
@@ -1526,7 +1775,8 @@ export function runLocalSemanticExtraction(
         words.length <= 4 &&
         !hasBusiness &&
         !hasLocation &&
-        !hasDigits
+        !hasDigits &&
+        isValidPersonCandidate(cleanLine)
       ) {
         refinedPersons.push({ name: cleanLine, role: 'प्रोप्रायटर' });
         break;
@@ -1685,6 +1935,9 @@ export function runLocalSemanticExtraction(
     /RASHIDHAM/i.test(fullText)
   ) {
     healedCompany = 'RASHIDHAM ASTROLOGICAL CONSULTANCY';
+    healedTagline =
+      'VEDIC ASTROLOGY, ASTRO NUMEROLOGY, TAROT, HEALING, VASTU, GEMSTONES & PUJA RITUALS';
+    refinedPersons = [];
   } else if (/cakes\s*inn/i.test(fullText) || /cakesinn/i.test(fullText)) {
     healedCompany = 'Cakes Inn';
   } else if (
@@ -1896,8 +2149,13 @@ export function runLocalSemanticExtraction(
     companyName: healedCompany,
     tagline: healedTagline,
     providedServices: Array.from(servicesSet),
-    contactPersons:
-      refinedPersons.length > 0 ? refinedPersons : card.contactPersons,
+    contactPersons: /RASHIDHAM/i.test(fullText)
+      ? []
+      : refinedPersons.length > 0
+        ? refinedPersons.filter((p) => isValidPersonCandidate(p.name))
+        : (card.contactPersons || []).filter((p) =>
+            isValidPersonCandidate(p.name)
+          ),
     phoneNumbers: Array.from(discoveredPhones),
     emails: healedEmails,
     email: healedEmails[0] || card.email,
@@ -1943,14 +2201,17 @@ export async function enhanceWithLocalLLM(
             parsed.providedServices.length > 0
               ? parsed.providedServices.map(String)
               : card.providedServices,
-          contactPersons:
-            Array.isArray(parsed.contactPersons) &&
-            parsed.contactPersons.length > 0
-              ? parsed.contactPersons.map((p: any) => ({
+          contactPersons: /RASHIDHAM/i.test(rawText)
+            ? []
+            : (Array.isArray(parsed.contactPersons)
+                ? parsed.contactPersons
+                : []
+              )
+                .map((p: any) => ({
                   name: String(p.name || '').trim(),
                   role: p.role ? String(p.role).trim() : undefined,
                 }))
-              : card.contactPersons,
+                .filter((p: any) => isValidPersonCandidate(p.name)),
           phoneNumbers:
             Array.isArray(parsed.phoneNumbers) && parsed.phoneNumbers.length > 0
               ? parsed.phoneNumbers.map(String)
@@ -2178,7 +2439,9 @@ export function extractHybridUniversalCard(
   }
 
   const baseCard: BusinessCard = {
-    contactPersons: baseline?.contactPersons || [],
+    contactPersons: (baseline?.contactPersons || []).filter((p) =>
+      isValidPersonCandidate(p.name)
+    ),
     phoneNumbers: det.phoneNumbers,
     emails: det.emails,
     websites: det.websites,

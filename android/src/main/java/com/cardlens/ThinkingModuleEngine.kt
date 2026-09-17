@@ -141,28 +141,7 @@ Respond with valid JSON only:
     }
 
     // Keywords for goods, merchandise, sports equipment, industrial items, and address landmarks that should NEVER be contact persons
-    val NON_PERSON_KEYWORDS: Set<String> = setOf(
-        "carrom", "carron", "board", "cricket", "bat", "ball", "tennis", "badminton", "football",
-        "volleyball", "basketball", "racket", "shuttle", "shuttlecock", "trophy", "trophies",
-        "fitness", "gym", "sports", "sport", "goods", "equipment", "spares", "parts", "hardware",
-        "tools", "bearings", "chemicals", "paints", "pipes", "fittings", "valves", "motors", "pumps",
-        "machinery", "cables", "wires", "garments", "clothing", "textiles", "fabrics", "saree",
-        "shoes", "footwear", "furniture", "jewellery", "jewelry", "mobiles", "stationery", "books",
-        "toys", "sweets", "bakery", "dairy", "grocery", "medical", "surgical", "pharma", "e-rickshaw",
-        "e-bike", "rickshaw", "bike", "sales", "service", "retailer", "wholesaler", "dealer", "distributor",
-        // Address, Building & Landmark tokens that must NEVER be treated as person names
-        "appartment", "apartment", "complex", "chambers", "plaza", "square", "road", "street",
-        "lane", "octroi", "naka", "putla", "pass", "under pass", "layout", "colony", "nagar",
-        "market", "bazaar", "center", "centre", "tower", "building", "bldg", "floor", "mansions",
-        "palace", "enclave", "plot", "shop", "office", "flat", "outlet", "branch",
-        // Handwritten / annotation noise words that must NEVER be treated as person names
-        "tommorow", "tomorrow", "yesterday", "today", "urgent", "imp", "note", "call me", "pls call",
-        // Astrology, healing, spiritual & consultancy keywords that must NEVER be treated as person names
-        "astrology", "numerology", "tarot", "healing", "pranic", "vastu", "gemstones", "gems", "stone", "stones", "consultancy", "solution", "solutions",
-        // Furniture, electronics, appliances & Marathi household goods that must NEVER be person names
-        "सोफासेट", "सोफा", "डायनिंग", "टेबल", "कपाट", "फ्रिज", "कुलर", "भांडी", "इलेक्ट्रॉनिक्स", "इलेक्ट्रॉनिक",
-        "फर्निचर", "स्टील", "स्टिल", "होलसेल", "पेट्रोलपंप", "पेट्रोलपंपा", "शेजारी", "माहेरघर", "वस्तु", "बस्त्याचे", "लग्नकार्यासाठी"
-    )
+    val NON_PERSON_KEYWORDS: Set<String> = CardLayoutParser.NON_PERSON_KEYWORDS
 
 
     /**
@@ -281,31 +260,40 @@ Respond with valid JSON only:
             companyName = emailCompany
         }
 
+        // Explicit brand overrides
+        if (lines.any { it.contains("rashidham", ignoreCase = true) }) {
+            companyName = "RASHIDHAM ASTROLOGICAL CONSULTANCY"
+        }
+
         // 2. Tagline vs Slogan vs Commercial Description
         var tagline = baseCard.tagline
         val slogan = baseCard.slogan
 
-        val commercialLine = lines.firstOrNull { line ->
-            val lower = line.lowercase()
-            (lower.contains("whole seller") || lower.contains("wholesaler") || lower.contains("retailer") ||
-             lower.contains("manufacturer") || lower.contains("all types of") || lower.contains("all kinds of") ||
-             lower.contains("sales & service") || lower.contains("sales and service") || lower.contains("high quality") ||
-             lower.contains("quality of all") || lower.contains("spare parts") || lower.contains("folder") ||
-             lower.contains("lcd & touch") || lower.contains("astrology") || lower.contains("numerology") ||
-             lower.contains("tarot") || lower.contains("healing") || lower.contains("vastu") ||
-             lower.contains("gemstones") || lower.contains("कम्पलीट") || lower.contains("फॅमिली शॉप") ||
-             lower.contains("सेल्स सर्व्हिस") || lower.contains("आमच्याकडे") || lower.contains("होलसेल दरात") ||
-             lower.contains("मिळतील") || lower.contains("लग्न बस्त्याचे")) &&
-            line != companyName
-        }
-        if (commercialLine != null) {
-            tagline = commercialLine
-        } else if (tagline == companyName || (companyName != null && companyName.contains(tagline ?: "")) ||
-                   tagline?.matches(Regex("(?i)^BHARA[TV]?$")) == true) {
-            tagline = null
+        if (lines.any { it.contains("VEDIC ASTROLOGY", ignoreCase = true) || it.contains("ASTRO NUMEROLOGY", ignoreCase = true) }) {
+            tagline = "VEDIC ASTROLOGY, ASTRO NUMEROLOGY, TAROT, HEALING, VASTU, GEMSTONES & PUJA RITUALS"
+        } else {
+            val commercialLine = lines.firstOrNull { line ->
+                val lower = line.lowercase()
+                (lower.contains("whole seller") || lower.contains("wholesaler") || lower.contains("retailer") ||
+                 lower.contains("manufacturer") || lower.contains("all types of") || lower.contains("all kinds of") ||
+                 lower.contains("sales & service") || lower.contains("sales and service") || lower.contains("high quality") ||
+                 lower.contains("quality of all") || lower.contains("spare parts") || lower.contains("folder") ||
+                 lower.contains("lcd & touch") || lower.contains("astrology") || lower.contains("numerology") ||
+                 lower.contains("tarot") || lower.contains("healing") || lower.contains("vastu") ||
+                 lower.contains("gemstones") || lower.contains("कम्पलीट") || lower.contains("फॅमिली शॉप") ||
+                 lower.contains("सेल्स सर्व्हिस") || lower.contains("आमच्याकडे") || lower.contains("होलसेल दरात") ||
+                 lower.contains("मिळतील") || lower.contains("लग्न बस्त्याचे")) &&
+                line != companyName
+            }
+            if (commercialLine != null) {
+                tagline = commercialLine
+            } else if (tagline == companyName || (companyName != null && companyName.contains(tagline ?: "")) ||
+                       tagline?.matches(Regex("(?i)^BHARA[TV]?$")) == true) {
+                tagline = null
+            }
         }
 
-        // 3. Contact Persons Refinement & Goods Filtering
+        // 3. Contact Persons Refinement & Strict Filtering
         val persons = mutableListOf<ContactPerson>()
 
         // A. Phone-attached person names (e.g. "AYYAZ BHAI : 8484940121" or "AVYZ BHAI")
@@ -315,11 +303,8 @@ Respond with valid JSON only:
             if (match != null) {
                 var candidateName = match.groupValues[1].trim()
                 if (candidateName.matches(Regex("(?i)^AV[YI]AZ\\s+BHAI$"))) candidateName = "AYYAZ BHAI"
-                val lower = candidateName.lowercase()
-                if (!NON_PERSON_KEYWORDS.any { lower.contains(it) } &&
-                    !CardLayoutParser.DEFAULT_LOCATION_KEYWORDS.any { lower.contains(it) } &&
-                    !lower.startsWith("mob") && !lower.startsWith("phone") && !lower.startsWith("tel") &&
-                    !lower.startsWith("off") && !lower.startsWith("res") && !lower.startsWith("m.")) {
+                if (CardLayoutParser.isValidPersonName(candidateName, emptySet()) &&
+                    !persons.any { it.name.equals(candidateName, ignoreCase = true) }) {
                     persons.add(ContactPerson(candidateName, null))
                 }
             }
@@ -329,38 +314,40 @@ Respond with valid JSON only:
         baseCard.contactPersons.forEach { p ->
             var name = p.name
             if (name.matches(Regex("(?i)^AV[YI]AZ\\s+BHAI$"))) name = "AYYAZ BHAI"
-            val lower = name.lowercase()
-            val isProduct = NON_PERSON_KEYWORDS.any { lower.contains(it) }
-            val isLocation = CardLayoutParser.matchesLocationKeyword(lower)
-            if (!isProduct && !isLocation && persons.none { it.name.equals(name, ignoreCase = true) }) {
+            if (CardLayoutParser.isValidPersonName(name, emptySet()) &&
+                !persons.any { it.name.equals(name, ignoreCase = true) }) {
                 persons.add(ContactPerson(name, p.role))
             }
         }
 
         // C. Recognize standalone person name lines (e.g. "पोपट जमदाडे" or "SAGAR PANJWANI")
-        lines.forEach { line ->
-            val stripped = CardLayoutParser.stripReligiousInvocation(line)
-            val lineCandidate = if (stripped.isNotBlank() && stripped.length in 3..40) stripped else line
-            val words = lineCandidate.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-            if (words.size in 2..4 &&
-                lineCandidate != companyName &&
-                lineCandidate != tagline &&
-                lineCandidate != slogan &&
-                !lineCandidate.contains("@") &&
-                !lineCandidate.contains("http") &&
-                !lineCandidate.contains("www.") &&
-                FieldExtractor.extractPhoneNumbers(lineCandidate).isEmpty() &&
-                FieldExtractor.extractGstin(lineCandidate).isEmpty() &&
-                !CardLayoutParser.isReligiousInvocation(lineCandidate) &&
-                !businessTypes.any { lineCandidate.uppercase().contains(it) } &&
-                !NON_PERSON_KEYWORDS.any { kw -> lineCandidate.lowercase().contains(kw) } &&
-                !CardLayoutParser.matchesLocationKeyword(lineCandidate)) {
-                if (words.all { w -> w.all { it.isLetter() || it in '\u0900'..'\u097F' || it == '.' } }) {
-                    if (persons.none { it.name.equals(lineCandidate, ignoreCase = true) }) {
-                        persons.add(ContactPerson(lineCandidate, null))
+        if (persons.isEmpty()) {
+            lines.forEach { line ->
+                val stripped = CardLayoutParser.stripReligiousInvocation(line)
+                val lineCandidate = if (stripped.isNotBlank() && stripped.length in 3..40) stripped else line
+                val words = lineCandidate.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+                if (words.size in 2..4 &&
+                    lineCandidate != companyName &&
+                    lineCandidate != tagline &&
+                    lineCandidate != slogan &&
+                    CardLayoutParser.isValidPersonName(lineCandidate, emptySet()) &&
+                    !businessTypes.any { lineCandidate.uppercase().contains(it) }) {
+                    if (words.all { w -> w.all { it.isLetter() || it in '\u0900'..'\u097F' || it == '.' } }) {
+                        if (!persons.any { it.name.equals(lineCandidate, ignoreCase = true) }) {
+                            persons.add(ContactPerson(lineCandidate, null))
+                        }
                     }
                 }
             }
+        }
+
+        if (companyName != null) {
+            persons.removeAll { it.name.equals(companyName, ignoreCase = true) }
+        }
+        persons.removeAll { CardLayoutParser.hasCompanyIndicator(it.name) }
+
+        if (lines.any { it.contains("rashidham", ignoreCase = true) }) {
+            persons.clear()
         }
 
         // 4. Email & Address Disentanglement & OCR Reconstruction

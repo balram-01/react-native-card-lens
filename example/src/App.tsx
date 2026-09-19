@@ -7,7 +7,7 @@
  *  3. Seamlessly renders structured contact fields or financial line-item tables
  *  4. Provides a 100% real, dynamic On-Device LLM (llama.rn / GGUF) manager with live progress
  */
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -28,9 +28,6 @@ import {
   startScanner,
   pickDocument,
   scanDocument,
-  isPaddleOcrReady,
-  extractContactFields,
-  extractCardLayout,
   refineCardWithThinkingModule,
   downloadThinkingModel,
   BUSINESS_CARD_GBNF_GRAMMAR,
@@ -38,7 +35,6 @@ import {
   extractHybridUniversalCard,
   parseFallbackLocalBill,
 } from 'react-native-card-lens';
-import { PaddleOcrStudio } from './components/PaddleOcrStudio';
 import type {
   RawOcrResult,
   ScanResult,
@@ -570,67 +566,10 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] =
     useState<ThinkingModelDownloadProgress | null>(null);
   const [slmLoading, setSlmLoading] = useState(false);
-
-  // PaddleOCR Multilingual State
-  const [showPaddleDemo, setShowPaddleDemo] = useState(false);
-  const [, setPaddleReady] = useState(false);
-
-  // Hybrid Marathi Extraction State (Deterministic + Snapping)
   const [hybridResult, setHybridResult] =
     useState<DeterministicExtractionResult | null>(null);
-  const [isHybridActive, setIsHybridActive] = useState(false);
-  const [showResidualModal, setShowResidualModal] = useState(false);
-
-  const checkPaddleStatus = async () => {
-    try {
-      const ready = await isPaddleOcrReady();
-      setPaddleReady(ready);
-    } catch {
-      setPaddleReady(false);
-    }
-  };
-
-  useEffect(() => {
-    checkPaddleStatus();
-  }, []);
-
-  const processPaddleResult = async (res: RawOcrResult) => {
-    try {
-      const contactFields = await extractContactFields(res.rawText);
-      let layoutFields: any = {};
-      try {
-        layoutFields = await extractCardLayout(res);
-      } catch {}
-      const card: BusinessCard = normalizeBusinessCard({
-        rawText: res.rawText,
-        companyName: layoutFields?.companyName,
-        tagline: layoutFields?.tagline,
-        providedServices: layoutFields?.providedServices,
-        contactPersons: layoutFields?.contactPersons,
-        addressLines: layoutFields?.addressLines,
-        phoneNumbers: contactFields.phoneNumbers || [],
-        emails: contactFields.emails || [],
-        websites: contactFields.websites || [],
-        gstin: contactFields.gstin?.[0],
-        pincode: contactFields.pincodes?.[0],
-      });
-
-      const det = extractDeterministicUniversal(res.rawText);
-      setHybridResult(det);
-      const finalCard: BusinessCard = extractHybridUniversalCard(
-        res.rawText,
-        card
-      );
-      setIsHybridActive(true);
-
-      setBusinessCard(finalCard);
-      setDetectedType('card');
-      return finalCard;
-    } catch (e: any) {
-      console.warn('Paddle result normalization error:', e);
-      return null;
-    }
-  };
+  const [isHybridActive, setIsHybridActive] = useState<boolean>(false);
+  const [showResidualModal, setShowResidualModal] = useState<boolean>(false);
 
   const llamaContextRef = useRef<LlamaContext | null>(null);
 
@@ -1058,22 +997,6 @@ Return this JSON format:
             </View>
           </View>
         </View>
-
-        {/* PaddleOCR Multilingual Studio Component */}
-        <PaddleOcrStudio
-          visible={showPaddleDemo}
-          onClose={() => setShowPaddleDemo(false)}
-          scannedImageUri={scannedImageUri}
-          scannedImageUris={scannedImageUris}
-          selectedPageIndex={selectedPageIndex}
-          onPickDocument={handlePickDocument}
-          onProcessCardResult={async (res) => {
-            setOcrResult(res);
-            await processPaddleResult(res);
-          }}
-          setStatusMessage={setStatusMessage}
-          setError={setError}
-        />
 
         {/* Dynamic On-Device LLM (GGUF) Manager (Collapsible) */}
         {showLlmManager && (
@@ -2651,113 +2574,6 @@ const styles = StyleSheet.create({
   },
   paddleStatusSub: {
     fontSize: 11,
-    color: '#94A3B8',
-    marginTop: 2,
-  },
-  paddlePrimaryBtn: {
-    flex: 1,
-    backgroundColor: '#0284C7',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  paddlePrimaryBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  paddleSamplesSection: {
-    marginTop: 14,
-  },
-  paddleSectionHeader: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#94A3B8',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  paddleSampleChip: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  paddleSampleChipActive: {
-    backgroundColor: '#0369A133',
-    borderColor: '#38BDF8',
-  },
-  paddleSampleTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#F1F5F9',
-  },
-  paddleSampleLang: {
-    fontSize: 10,
-    color: '#38BDF8',
-    marginTop: 2,
-  },
-  paddleActionBtn: {
-    backgroundColor: '#0284C7',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  paddleActionBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  paddleLatencyBadge: {
-    backgroundColor: '#082F49',
-    borderRadius: 8,
-    padding: 10,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: '#0284C7',
-  },
-  paddleLatencyText: {
-    fontSize: 12,
-    color: '#E0F2FE',
-  },
-  paddleLatencySub: {
-    fontSize: 11,
-    color: '#7DD3FC',
-    marginTop: 2,
-  },
-
-  /* PaddleOCR Live Output Console Styles */
-  paddleConsoleContainer: {
-    marginTop: 14,
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#0284C7',
-    padding: 12,
-  },
-  paddleConsoleHeader: {
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-    paddingBottom: 8,
-    marginBottom: 10,
-  },
-  paddleConsoleTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#38BDF8',
-    letterSpacing: 0.3,
-  },
-  paddleLatencyTag: {
-    backgroundColor: '#0284C7',
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    marginLeft: 8,
   },
   paddleLatencyTagText: {
     color: '#FFFFFF',

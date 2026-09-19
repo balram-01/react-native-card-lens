@@ -200,6 +200,8 @@ Respond with valid JSON only:
                 val prevLine = lines[idx - 1].trim()
                 if (prevLine.length in 2..30 &&
                     !prevLine.contains("@") &&
+                    !prevLine.contains(":") &&
+                    !prevLine.contains(Regex("\\d")) &&
                     FieldExtractor.extractPhoneNumbers(prevLine).isEmpty() &&
                     FieldExtractor.extractGstin(prevLine).isEmpty() &&
                     !CardLayoutParser.isReligiousInvocation(prevLine) &&
@@ -213,56 +215,133 @@ Respond with valid JSON only:
                    taglineRaw.length <= 25 &&
                    !taglineRaw.contains("solution", ignoreCase = true) &&
                    !taglineRaw.contains("whole", ignoreCase = true) &&
+                   !companyName.contains("LTD", ignoreCase = true) &&
+                   !companyName.contains("PVT", ignoreCase = true) &&
+                   !companyName.contains("LIMITED", ignoreCase = true) &&
+                   !companyName.contains("INC", ignoreCase = true) &&
+                   !companyName.contains("LLP", ignoreCase = true) &&
                    businessTypes.any { taglineRaw.uppercase().contains(it) }) {
             companyName = "$companyName $taglineRaw"
         }
 
-        // Multi-line brand mergers:
-        // A. Cakes Inn
-        val cakesLine = lines.firstOrNull { it.matches(Regex("(?i)^cakes?\\s*inn.*$")) }
-        if (cakesLine != null) {
-            companyName = "Cakes Inn"
-        } else {
-            val hasCakes = lines.any { it.matches(Regex("(?i)^cakes?.*$")) }
-            val hasInn = lines.any { it.matches(Regex("(?i)^inn.*$")) }
-            if (hasCakes && hasInn) {
-                companyName = "Cakes Inn"
+        // Dynamic Domain & Handle Matching from emails/websites:
+        val emails = FieldExtractor.extractEmails(rawText)
+        val websites = FieldExtractor.extractWebsites(rawText)
+        val domainSlugs = mutableListOf<String>()
+        val cleanSlug = { s: String -> s.lowercase().replace(Regex("[^a-z0-9]"), "") }
+        val commonWebmail = setOf("gmail", "yahoo", "hotmail", "outlook", "rediffmail", "icloud", "live")
+
+        var emailSynthesizedCompany: String? = null
+        for (email in emails) {
+            val parts = email.split("@")
+            val fullHandle = parts.getOrNull(0)?.split(".")?.firstOrNull() ?: ""
+            val handle = cleanSlug(fullHandle.replace(Regex("[0-9]+$"), ""))
+            val domain = parts.getOrNull(1)?.split(".")?.firstOrNull()?.lowercase() ?: ""
+            if (domain.isNotBlank() && domain !in commonWebmail) {
+                val c = cleanSlug(domain)
+                if (c.length >= 4) domainSlugs.add(c)
+            } else if (domain in commonWebmail && handle.length >= 4 && handle !in setOf("info", "contact", "admin", "sales", "support", "office", "help")) {
+                domainSlugs.add(handle)
+                val cat = businessTypes.firstOrNull { handle.uppercase().endsWith(it) && handle.length > it.length }
+                if (cat != null) {
+                    val brand = handle.substring(0, handle.length - cat.length)
+                    emailSynthesizedCompany = "${brand.uppercase()} ${cat.uppercase()}"
+                }
+            }
+        }
+        for (site in websites) {
+            val cleanSite = site.replace(Regex("^https?://", RegexOption.IGNORE_CASE), "").replace(Regex("^www\\.", RegexOption.IGNORE_CASE), "")
+            val domain = cleanSite.split("/").firstOrNull()?.split(".")?.firstOrNull() ?: ""
+            val c = cleanSlug(domain)
+            if (c.length >= 4) domainSlugs.add(c)
+        }
+
+        var domainMatchedCompany: String? = null
+        if (domainSlugs.isNotEmpty()) {
+            for (i in lines.indices) {
+                val line = lines[i]
+                if (line.length in 4..65 &&
+                    !line.contains("@") &&
+                    !line.startsWith("http", ignoreCase = true) &&
+                    !line.contains("www.", ignoreCase = true) &&
+                    !line.contains(Regex("\\.(?:com|in|org|net|co|io)\\b", RegexOption.IGNORE_CASE)) &&
+                    !line.startsWith("•") && !line.startsWith("-") && !line.startsWith("*") &&
+                    !line.matches(Regex("(?i)^(?:Tel|Mob|Phone|Email|GSTIN|Plot|Shop|Road|Address|Res Add|Off).*")) &&
+                    !line.matches(Regex("(?i)^(?:Dr\\.|Adv\\.|Mr\\.|Mrs\\.|Ms\\.|Shri\\b).*")) &&
+                    !line.matches(Regex("^[0-9+].*")) &&
+                    !baseCard.contactPersons.any { it.name.equals(line, ignoreCase = true) }) {
+
+                    val cleanLine = cleanSlug(line)
+                    val matchedSlug = domainSlugs.firstOrNull { slug ->
+                        cleanLine.contains(slug) || slug.contains(cleanLine) ||
+                        (slug.length >= 5 && cleanLine.length >= 5 &&
+                         (cleanLine.startsWith(slug.take(5)) || slug.startsWith(cleanLine.take(5))))
+                    }
+                    if (matchedSlug != null) {
+                        var candidate = line.trim()
+                        if (!cleanLine.contains(matchedSlug) && i + 1 < lines.size) {
+                            val nextLine = lines[i + 1].trim()
+                            val nextUpper = nextLine.uppercase()
+                            val nextHasCat = businessTypes.any { nextUpper.contains(it) }
+                            val nextFormatted = if (nextLine.all { it.isLowerCase() }) nextLine.replaceFirstChar { it.titlecase() } else nextLine
+                            val combined = "$candidate $nextFormatted"
+                            val cleanCombined = cleanSlug(combined)
+                            if ((nextHasCat || cleanCombined.contains(matchedSlug) || matchedSlug.contains(cleanCombined)) &&
+                                nextLine.length <= 30 &&
+                                !nextLine.startsWith("•") && !nextLine.startsWith("-") && !nextLine.startsWith("*") &&
+                                !nextLine.contains("@") && !nextLine.contains("www.") &&
+                                !nextLine.contains(Regex("\\.(?:com|in|org|net|co|io)\\b", RegexOption.IGNORE_CASE)) &&
+                                !nextLine.matches(Regex("^[0-9+].*")) &&
+                                !baseCard.contactPersons.any { it.name.equals(nextLine, ignoreCase = true) }) {
+                                candidate = combined
+                            }
+                        }
+                        domainMatchedCompany = candidate
+                        break
+                    }
+                }
             }
         }
 
-        // B. Check if company name was split into "SPORTS" with tagline/prefix "BHARAVT" / "BHARAT"
-        if (companyName?.equals("SPORTS", ignoreCase = true) == true) {
-            val prefix = lines.firstOrNull { it.matches(Regex("(?i)^BHARA[TV]?$")) }
-            if (prefix != null) {
-                companyName = "BHARAT SPORTS"
+        // Multi-line brand & category synthesizer
+        var multiLineBrandCompany: String? = null
+        for (i in 1 until lines.size) {
+            val line = lines[i].trim()
+            val prev = lines[i - 1].trim()
+            val hasCategory = businessTypes.any { line.uppercase().contains(it) }
+            val prevHasCategory = businessTypes.any { prev.uppercase().contains(it) }
+            val lineIsCategoryOnly = businessTypes.any { line.equals(it, ignoreCase = true) } ||
+                (line.split(Regex("\\s+")).size <= 2 && businessTypes.any { line.uppercase().startsWith(it) })
+
+            if (!prevHasCategory && hasCategory && lineIsCategoryOnly &&
+                prev.length in 2..35 && line.length in 2..40 &&
+                !prev.contains(":") && !prev.contains(Regex("\\d")) &&
+                FieldExtractor.extractPhoneNumbers(prev).isEmpty() &&
+                !prev.startsWith("•") && !prev.startsWith("-") && !prev.startsWith("*") &&
+                !line.startsWith("•") && !line.startsWith("-") && !line.startsWith("*") &&
+                !prev.contains("@") && !prev.contains("www.") &&
+                !prev.contains(Regex("\\.(?:com|in|org|net|co|io)\\b", RegexOption.IGNORE_CASE)) &&
+                !line.contains("@") && !line.contains("www.") &&
+                !line.contains(Regex("\\.(?:com|in|org|net|co|io)\\b", RegexOption.IGNORE_CASE)) &&
+                !prev.matches(Regex("(?i)^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add).*")) &&
+                !line.matches(Regex("(?i)^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add).*")) &&
+                !prev.contains("प्रसन्न") && !prev.contains("श्री") && !prev.contains("एक") &&
+                !prev.matches(Regex("^[0-9+].*")) && !line.matches(Regex("^[0-9+].*")) &&
+                !baseCard.contactPersons.any { it.name.equals(prev, ignoreCase = true) || it.name.equals(line, ignoreCase = true) }) {
+                if (line.split(Regex("\\s+")).size <= 4) {
+                    val lineFormatted = if (line.all { it.isLowerCase() }) line.replaceFirstChar { it.titlecase() } else line
+                    multiLineBrandCompany = "$prev $lineFormatted".trim()
+                    break
+                }
             }
         }
-        if (taglineRaw?.matches(Regex("(?i)^BHARA[TV]?$")) == true) {
-            companyName = "BHARAT SPORTS"
-        }
 
-        // C. Fallback: If companyName is null or matches a person's name, infer from email domain/handle prefix
-        val companyEmail = FieldExtractor.extractEmails(rawText).firstOrNull()
-        val emailCompany = if (companyEmail != null) {
-            val prefix = companyEmail.substringBefore("@").split(".").firstOrNull() ?: ""
-            when {
-                prefix.contains("varietysport", ignoreCase = true) -> "VARIETY SPORTS"
-                prefix.contains("hestensolution", ignoreCase = true) -> "Hesten Solutions Pvt. Ltd."
-                prefix.contains("cakesinn", ignoreCase = true) -> "Cakes Inn"
-                prefix.contains("rashidham", ignoreCase = true) -> "RASHIDHAM ASTROLOGICAL CONSULTANCY"
-                else -> null
-            }
-        } else null
-
-        if (emailCompany != null && (companyName == null ||
-            baseCard.contactPersons.any { it.name.equals(companyName, ignoreCase = true) } ||
-            !businessTypes.any { companyName?.uppercase()?.contains(it) == true })) {
-            companyName = emailCompany
-        }
-
-        // Explicit brand overrides
-        if (lines.any { it.contains("rashidham", ignoreCase = true) }) {
-            companyName = "RASHIDHAM ASTROLOGICAL CONSULTANCY"
+        if (domainMatchedCompany != null) {
+            companyName = domainMatchedCompany
+        } else if (multiLineBrandCompany != null) {
+            companyName = multiLineBrandCompany
+        } else if (emailSynthesizedCompany != null && (companyName == null || baseCard.contactPersons.any { it.name.equals(companyName, ignoreCase = true) } || !businessTypes.any { companyName?.uppercase()?.contains(it) == true })) {
+            companyName = emailSynthesizedCompany
         }
 
         // 2. Tagline vs Slogan vs Commercial Description
@@ -346,16 +425,15 @@ Respond with valid JSON only:
         }
         persons.removeAll { CardLayoutParser.hasCompanyIndicator(it.name) }
 
-        if (lines.any { it.contains("rashidham", ignoreCase = true) }) {
-            persons.clear()
+        if (companyName != null) {
+            persons.removeAll { it.name.equals(companyName, ignoreCase = true) || companyName.contains(it.name, ignoreCase = true) }
+        }
+        if (tagline != null) {
+            persons.removeAll { it.name.equals(tagline, ignoreCase = true) || tagline.contains(it.name, ignoreCase = true) }
         }
 
         // 4. Email & Address Disentanglement & OCR Reconstruction
         val allEmails = FieldExtractor.extractEmails(rawText).toMutableList()
-        // Check for corrupted email like fnolbhstsporti208gnal com
-        if (allEmails.isEmpty() && (rawText.contains("bharatsport", ignoreCase = true) || rawText.contains("bhstsport", ignoreCase = true))) {
-            allEmails.add("bharatsports29@gmail.com")
-        }
 
         val refinedAddresses = mutableListOf<String>()
 
@@ -420,8 +498,8 @@ Respond with valid JSON only:
                 FieldExtractor.extractEmails(line).isEmpty() &&
                 FieldExtractor.extractWebsites(line).isEmpty() &&
                 FieldExtractor.extractGstin(line).isEmpty() &&
-                !line.lowercase().startsWith("cakesinn") &&
-                !line.lowercase().contains("cakes inn")) {
+                (companyName == null || !line.contains(companyName, ignoreCase = true)) &&
+                domainSlugs.none { slug -> cleanSlug(line).contains(slug) }) {
 
                 var cleanLine = line.replace(PIPE_BRANCH_STRIP_REGEX, "").trim()
                 cleanLine = cleanLine.replace(EMAIL_STRIP_REGEX1, "").trim()

@@ -210,7 +210,7 @@ object CardLayoutParser {
         "राशि", "राशी", "कुंडली", "मकर", "वृश्चिक", "धनु", "तुला", "मेष", "वृषभ", "मिथुन", "कर्क", "सिंह", "कन्या", "कुंभ", "मीन",
         "सूर्य", "सुर्य", "चंद्र", "मंगल", "बुध", "गुरु", "शुक्र", "शनि", "राहु", "केतु", "बृहस्पति", "ग्रह", "नक्षत्र", "पूजा", "हवन", "rituals",
         "zodiac", "horoscope", "astrology", "numerology", "tarot", "healing", "vastu", "gemstones", "gems", "stone", "stones", "consultancy",
-        "vedic astrology", "astro numerology", "puja rituals", "rashidham",
+        "vedic astrology", "astro numerology", "puja rituals", "pranic", "pranic healing",
         // Sports, merchandise, industrial
         "carrom", "carron", "board", "cricket", "bat", "ball", "tennis", "badminton", "football",
         "volleyball", "basketball", "racket", "shuttle", "shuttlecock", "trophy", "trophies",

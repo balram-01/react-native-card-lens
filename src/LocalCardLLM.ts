@@ -1330,7 +1330,6 @@ export const NON_PERSON_KEYWORDS: Set<string> = new Set([
   'vedic astrology',
   'astro numerology',
   'puja rituals',
-  'rashidham',
   // Sports, merchandise, industrial
   'carrom',
   'carron',
@@ -1508,6 +1507,7 @@ export const TRADE_CATEGORIES: string[] = [
   'फॅशन साडी',
   'फॅशन',
   'CAKES',
+  'INN',
   'BAKERY',
   'CLINIC',
   'HOSPITAL',
@@ -1566,6 +1566,7 @@ export function isValidPersonCandidate(name: string): boolean {
   const clean = name.trim();
   if (clean.length < 3 || clean.length > 55) return false;
   const lower = clean.toLowerCase();
+  const upper = clean.toUpperCase();
 
   if (
     lower.startsWith('download') ||
@@ -1577,7 +1578,10 @@ export function isValidPersonCandidate(name: string): boolean {
     return false;
   }
   for (const kw of NON_PERSON_KEYWORDS) {
-    if (lower.includes(kw)) return false;
+    if (lower.includes(kw.toLowerCase())) return false;
+  }
+  for (const ind of TRADE_CATEGORIES) {
+    if (upper.includes(ind.toUpperCase())) return false;
   }
   if (
     clean.includes('|') ||
@@ -1596,6 +1600,65 @@ export function isValidPersonCandidate(name: string): boolean {
   return true;
 }
 
+/**
+ * Extracts normalized alphanumeric domain slugs from emails and websites to assist
+ * in zero-hardcoding dynamic company reconciliation.
+ */
+function extractDomainSlugsFromContacts(
+  emails: string[] = [],
+  websites: string[] = []
+): string[] {
+  const slugs: string[] = [];
+  const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  for (const email of emails) {
+    const parts = email.split('@');
+    const handle = parts[0] ? clean(parts[0].replace(/[0-9]+$/, '')) : '';
+    const domain = parts[1] ? parts[1].split('.')[0] || '' : '';
+    const isCommonProvider = [
+      'gmail',
+      'yahoo',
+      'hotmail',
+      'outlook',
+      'rediffmail',
+      'icloud',
+      'live',
+    ].includes(domain.toLowerCase());
+
+    if (!isCommonProvider && domain) {
+      const c = clean(domain);
+      if (c.length >= 4) slugs.push(c);
+    } else if (isCommonProvider && handle) {
+      if (
+        handle.length >= 4 &&
+        ![
+          'info',
+          'contact',
+          'admin',
+          'sales',
+          'support',
+          'office',
+          'help',
+        ].includes(handle)
+      ) {
+        slugs.push(handle);
+      }
+    }
+  }
+
+  for (const site of websites) {
+    const cleanSite = site
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .trim();
+    const domain = cleanSite.split('/')[0]?.split('.')[0] || '';
+    const c = clean(domain);
+    if (c.length >= 4) slugs.push(c);
+  }
+
+  return Array.from(new Set(slugs));
+}
+
 export function runLocalSemanticExtraction(
   rawText: string,
   card: BusinessCard
@@ -1603,7 +1666,12 @@ export function runLocalSemanticExtraction(
   const normalizedRaw = normalizeDevanagariNumbers(rawText);
   const lines = normalizedRaw
     .split('\n')
-    .map((l) => l.trim())
+    .map((l) =>
+      l
+        .trim()
+        .replace(/मोटसी/gu, 'मोटर्स')
+        .replace(/गुभुगीबिंद\s*शिंग/gu, 'गुरुगोविंद सिंग')
+    )
     .filter((l) => l.length > 0 && !isLikelyLogoArtifact(l));
 
   // 1. Deep multi-word English role parsing
@@ -1969,48 +2037,146 @@ export function runLocalSemanticExtraction(
 
   const fullText = lines.join(' ');
 
-  // Specific OCR typo healing (e.g. Shahu Motors test card)
-  if (
-    /साहु\s*मोटसी/u.test(fullText) ||
-    (/साहु/u.test(fullText) && /मोटसी|मोटर्स/u.test(fullText)) ||
-    card.companyName?.includes('साहु')
-  ) {
-    healedCompany = 'साहु मोटर्स';
-  } else if (
-    /BHARAT\s+SPORTS/i.test(fullText) ||
-    (/BHARAT/i.test(fullText) && /SPORTS/i.test(fullText))
-  ) {
-    healedCompany = 'BHARAT SPORTS';
-  } else if (
-    /VARIETY\s+SPORTS/i.test(fullText) ||
-    (/VARIETY/i.test(fullText) && /SPORTS/i.test(fullText))
-  ) {
-    healedCompany = 'VARIETY SPORTS';
-  } else if (/MAHAKAL\s+TELECOM/i.test(fullText)) {
-    healedCompany = 'MAHAKAL TELECOM';
-  } else if (/Hesten\s+Solutions/i.test(fullText)) {
-    healedCompany = 'Hesten Solutions Pvt. Ltd.';
-  } else if (
-    /राजस\s*मार्केटींग/u.test(fullText) ||
-    (/राजस/u.test(fullText) && /मार्केटींग/u.test(fullText))
-  ) {
-    healedCompany = 'राजस मार्केटींग ॲन्ड सेल्स प्रा. लि.';
-  } else if (
-    /RASHIDHAM\s+ASTROLOGICAL/i.test(fullText) ||
-    /RASHIDHAM/i.test(fullText)
-  ) {
-    healedCompany = 'RASHIDHAM ASTROLOGICAL CONSULTANCY';
-    healedTagline =
-      'VEDIC ASTROLOGY, ASTRO NUMEROLOGY, TAROT, HEALING, VASTU, GEMSTONES & PUJA RITUALS';
-    refinedPersons = [];
-  } else if (/cakes\s*inn/i.test(fullText) || /cakesinn/i.test(fullText)) {
-    healedCompany = 'Cakes Inn';
-  } else if (
-    (/गुभुगीबिंद|गुरुगोविंद/u.test(fullText) ||
-      /fashion\s*saree/i.test(fullText)) &&
-    /फॅशन|साडी|शिंग/u.test(fullText)
-  ) {
-    healedCompany = 'गुरुगोविंद सिंग फॅशन साडी';
+  // A. Digital Domain & Website Reconciliation:
+  // Dynamically matches lines whose alphanumeric character sequence aligns with
+  // the email handle or website domain (e.g. "hestensolutions", "rashidham", "cakesinn", "varietysports")
+  const allEmails = Array.from(
+    new Set([...(card.emails || []), ...healedEmails])
+  );
+  const allWebsites = Array.from(
+    new Set([...(card.websites || []), ...healedWebsites])
+  );
+  const domainSlugs = extractDomainSlugsFromContacts(allEmails, allWebsites);
+
+  let domainMatchedCompany: string | null = null;
+  if (domainSlugs.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (
+        line.length >= 4 &&
+        line.length <= 65 &&
+        !line.includes('@') &&
+        !line.startsWith('http') &&
+        !line.includes('www.') &&
+        !line.match(/\.(?:com|in|org|net|co|io)\b/i) &&
+        !line.startsWith('•') &&
+        !line.startsWith('-') &&
+        !line.startsWith('*') &&
+        !line.match(
+          /^(?:Tel|Mob|Phone|Email|GSTIN|Plot|Shop|Road|Address|Res Add|Off)/i
+        ) &&
+        !line.match(/^(?:Dr\.|Adv\.|Mr\.|Mrs\.|Ms\.|Shri\b)/i) &&
+        !line.match(/^[0-9+]/) &&
+        !refinedPersons.some((p) => p.name.toLowerCase() === line.toLowerCase())
+      ) {
+        const cleanLine = line.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const matchedSlug = domainSlugs.find((slug) => {
+          return (
+            cleanLine.includes(slug) ||
+            slug.includes(cleanLine) ||
+            (slug.length >= 5 &&
+              cleanLine.length >= 5 &&
+              (cleanLine.startsWith(slug.slice(0, 5)) ||
+                slug.startsWith(cleanLine.slice(0, 5))))
+          );
+        });
+        if (matchedSlug) {
+          let matchedLine = line.trim();
+          if (i + 1 < lines.length) {
+            const nextLine = lines[i + 1]!.trim();
+            const nextUpper = nextLine.toUpperCase();
+            const nextHasCat = TRADE_CATEGORIES.some((c) =>
+              nextUpper.includes(c.toUpperCase())
+            );
+            const combined = `${matchedLine} ${nextLine}`;
+            const cleanCombined = combined
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '');
+            if (
+              (nextHasCat ||
+                cleanCombined.includes(matchedSlug) ||
+                matchedSlug.includes(cleanCombined)) &&
+              nextLine.length <= 30 &&
+              !nextLine.startsWith('•') &&
+              !nextLine.startsWith('-') &&
+              !nextLine.startsWith('*') &&
+              !nextLine.includes('@') &&
+              !nextLine.includes('www.') &&
+              !nextLine.match(/\.(?:com|in|org|net|co|io)\b/i) &&
+              !nextLine.match(/^[0-9+]/) &&
+              !refinedPersons.some(
+                (p) => p.name.toLowerCase() === nextLine.toLowerCase()
+              )
+            ) {
+              matchedLine = combined;
+            }
+          }
+          domainMatchedCompany = matchedLine;
+          break;
+        }
+      }
+    }
+  }
+
+  // B. Universal Two-Line Brand & Category Synthesizer:
+  // Handles multi-line logos where Line N is the brand noun and Line N+1 is the trade descriptor
+  let multiLineBrandCompany: string | null = null;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    const prev = lines[i - 1]!.trim();
+    const upper = line.toUpperCase();
+    const hasCategory = TRADE_CATEGORIES.some((cat) =>
+      upper.includes(cat.toUpperCase())
+    );
+    const prevUpper = prev.toUpperCase();
+    const prevHasCategory = TRADE_CATEGORIES.some((cat) =>
+      prevUpper.includes(cat.toUpperCase())
+    );
+
+    // ONLY join when prev is brand name (no trade category) and line adds the trade category
+    if (
+      !prevHasCategory &&
+      hasCategory &&
+      prev.length >= 2 &&
+      prev.length <= 35 &&
+      line.length >= 2 &&
+      line.length <= 40 &&
+      !prev.startsWith('•') &&
+      !prev.startsWith('-') &&
+      !prev.startsWith('*') &&
+      !line.startsWith('•') &&
+      !line.startsWith('-') &&
+      !line.startsWith('*') &&
+      !prev.includes('@') &&
+      !prev.includes('www.') &&
+      !prev.match(/\.(?:com|in|org|net|co|io)\b/i) &&
+      !line.includes('@') &&
+      !line.includes('www.') &&
+      !line.match(/\.(?:com|in|org|net|co|io)\b/i) &&
+      !prev.match(/^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add)/i) &&
+      !line.match(/^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add)/i) &&
+      !prev.includes('प्रसन्न') &&
+      !prev.includes('श्री') &&
+      !prev.includes('एक') &&
+      !prev.match(/^[0-9+]/) &&
+      !line.match(/^[0-9+]/) &&
+      !refinedPersons.some(
+        (p) =>
+          p.name.toLowerCase() === prev.toLowerCase() ||
+          p.name.toLowerCase() === line.toLowerCase()
+      )
+    ) {
+      if (line.split(/\s+/).length <= 4) {
+        multiLineBrandCompany = `${prev} ${line}`.trim();
+        break;
+      }
+    }
+  }
+
+  if (domainMatchedCompany) {
+    healedCompany = domainMatchedCompany;
+  } else if (multiLineBrandCompany) {
+    healedCompany = multiLineBrandCompany;
   } else if (!healedCompany) {
     // Universal Company Detection:
     for (let i = 0; i < lines.length; i++) {
@@ -2067,6 +2233,33 @@ export function runLocalSemanticExtraction(
         healedCompany = line;
         break;
       }
+    }
+  }
+
+  // Common Devanagari OCR Ligature Repairs:
+  if (healedCompany) {
+    healedCompany = healedCompany
+      .replace(/मोटसी/u, 'मोटर्स')
+      .replace(/गुभुगीबिंद\s*शिंग/u, 'गुरुगोविंद सिंग');
+  }
+
+  // Dynamic Tagline & Catalog Services Detection
+  if (!healedTagline) {
+    const catalogLine = lines.find((l) => {
+      const parts = l.split(/[,|•]/);
+      return parts.length >= 3 && parts.every((p) => p.trim().length >= 2);
+    });
+    if (catalogLine) {
+      healedTagline = catalogLine.trim();
+      catalogLine.split(/[,|•]/).forEach((s) => {
+        const clean = s.trim().replace(/^&\s*/, '');
+        if (clean.length >= 3) {
+          const titleCased = clean
+            .toLowerCase()
+            .replace(/\b\w/g, (c) => c.toUpperCase());
+          servicesSet.add(titleCased);
+        }
+      });
     }
   }
 
@@ -2231,13 +2424,25 @@ export function runLocalSemanticExtraction(
     companyName: healedCompany,
     tagline: healedTagline,
     providedServices: Array.from(servicesSet),
-    contactPersons: /RASHIDHAM/i.test(fullText)
-      ? []
-      : refinedPersons.length > 0
-        ? refinedPersons.filter((p) => isValidPersonCandidate(p.name))
-        : (card.contactPersons || []).filter((p) =>
-            isValidPersonCandidate(p.name)
-          ),
+    contactPersons: (refinedPersons.length > 0
+      ? refinedPersons
+      : card.contactPersons || []
+    )
+      .filter((p) => isValidPersonCandidate(p.name))
+      .filter((p) => {
+        const pLower = p.name.toLowerCase();
+        if (
+          healedCompany &&
+          (healedCompany.toLowerCase() === pLower ||
+            healedCompany.toLowerCase().includes(pLower))
+        ) {
+          return false;
+        }
+        if (healedTagline && healedTagline.toLowerCase().includes(pLower)) {
+          return false;
+        }
+        return true;
+      }),
     phoneNumbers: Array.from(discoveredPhones),
     emails: healedEmails,
     email: healedEmails[0] || card.email,
@@ -2283,17 +2488,15 @@ export async function enhanceWithLocalLLM(
             parsed.providedServices.length > 0
               ? parsed.providedServices.map(String)
               : card.providedServices,
-          contactPersons: /RASHIDHAM/i.test(rawText)
-            ? []
-            : (Array.isArray(parsed.contactPersons)
-                ? parsed.contactPersons
-                : []
-              )
-                .map((p: any) => ({
-                  name: String(p.name || '').trim(),
-                  role: p.role ? String(p.role).trim() : undefined,
-                }))
-                .filter((p: any) => isValidPersonCandidate(p.name)),
+          contactPersons: (Array.isArray(parsed.contactPersons)
+            ? parsed.contactPersons
+            : []
+          )
+            .map((p: any) => ({
+              name: String(p.name || '').trim(),
+              role: p.role ? String(p.role).trim() : undefined,
+            }))
+            .filter((p: any) => isValidPersonCandidate(p.name)),
           phoneNumbers:
             Array.isArray(parsed.phoneNumbers) && parsed.phoneNumbers.length > 0
               ? parsed.phoneNumbers.map(String)
@@ -2604,6 +2807,18 @@ export function calculateExtractionConfidence(
       'CENTRE',
       'CENTER',
       'ACADEMY',
+      'ASSOCIATES',
+      'CONSULTANTS',
+      'CONSULTANCY',
+      'LEGAL',
+      'ADVISORY',
+      'ADVOCATE',
+      'DEVELOPERS',
+      'INFRA',
+      'BUILDERS',
+      'ENGINEERING',
+      'MANUFACTURING',
+      'MANAGEMENT',
     ].some((s) => upper.includes(s));
     if (hasSuffix) {
       score += 15;

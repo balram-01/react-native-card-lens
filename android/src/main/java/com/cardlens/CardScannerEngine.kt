@@ -219,7 +219,6 @@ object CardScannerEngine {
             !CardLayoutParser.hasCompanyIndicator(p.name)
         }
         val finalPersons = when {
-            rawText.contains("rashidham", ignoreCase = true) -> emptyList()
             validRefinedPersons.isNotEmpty() -> validRefinedPersons
             else -> validCandidatePersons
         }

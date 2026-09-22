@@ -14,8 +14,6 @@
 - 🇮🇳 **Multilingual & Devanagari Support**: Dual-recognizer routing (Latin & Devanagari) with automatic script detection for Hindi, Marathi, Sanskrit, Konkani, and Nepali text.
 - 🔒 **100% On-Device & Private**: Zero data leaves the device. Complete GDPR and HIPAA compliance by design.
 
-> 📘 **Production Architecture Guide**: Learn how to implement the two-tier progressive pipeline (Fast Path <100ms + 900MB Local SLM) in the [Efficient Module Implementation Guide](docs/EFFICIENT_MODULE_IMPLEMENTATION_GUIDE.md).
-
 ---
 
 ## Installation

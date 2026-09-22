@@ -107,12 +107,12 @@ You are an expert on-device document intelligence assistant specializing in busi
 
 CRITICAL DISAMBIGUATION & ACCURACY RULES:
 1. "companyName": Official commercial business, company, enterprise, or corporate brand name (e.g. "OM INDUSTRIES", "Tata Consultancy Services", "Bharat Sports", "Cakes Inn").
-   - NEGATIVE CONSTRAINT: NEVER extract product catalogs, manufactured goods, or services (e.g. "MCB Box, Fan Box, Modular Box", "Xerox, Printing, Binding") as companyName!
+   - NEGATIVE CONSTRAINT: NEVER extract "OUR SERVICES", "SERVICES", product catalogs, manufactured goods, or offerings as companyName!
    - NEGATIVE CONSTRAINT: NEVER extract the owner, manager, or contact person's name (e.g. "Anil Mittal") as companyName!
-2. "providedServices": Array of products, manufactured items, offerings, or services listed on the card (e.g. ["MCB Box", "Junction Box", "Fan Box", "Modular Box", "Concealed Box"]). Strip trailing "etc.", "and more", or ellipses.
+2. "providedServices": Array of products, offerings, services, or catalog items listed on the card (e.g. ["Computer", "CCTV Camera", "Laptop Repairing", "Data Recovery"]). Include items under "OUR SERVICES" or lines starting with bullet symbols (>, •, -, *). Strip bullet symbols.
 3. "tagline": Business description, specialty, or category (e.g. "Switchgears & Electricals", "Whole Seller & Retailer of Sports Goods").
 4. "slogan": Inspirational quote or motto if present.
-5. "contactPersons": Array of human individuals [{"name": "Anil Mittal", "role": null}]. Set "role" to professional title (e.g. "Director", "Managing Partner", "Proprietor") or null. NEVER extract landmarks, roads, colonies, or products as persons.
+5. "contactPersons": Array of human individuals [{"name": "Anil Mittal", "role": null}]. Set "role" to professional title (e.g. "Director", "Managing Partner", "Proprietor") or null. NEVER extract services, repair actions (e.g. "Laptop Repairing", "Printer Repairing", "Data Recovery", "CCTV Camera", "AMC"), landmarks, or products as persons! If no person is named on the card, return [].
 6. "phoneNumbers": List of clean 10-digit mobile numbers or landline numbers (with optional label object {"number": "9999999999", "label": "Mobile"}).
 7. "emails": List of valid email addresses. Heal OCR scanning errors (e.g. "@" misread as "fd", "cl", "(a)", or "8" before domains like "xyz.com" or "gmail.com"). NEVER classify an email as a website.
 8. "websites": List of clean website domains or URLs (e.g. "www.example.com", "example.com"). Must NOT contain "@".
@@ -170,6 +170,9 @@ Respond with valid JSON only:
             "SALON", "SPA", "FITNESS", "GYM", "TRAVELS", "AUTO", "ELECTRONICS",
             "TELECOM", "COMMUNICATIONS", "COMMUNICATION", "CONSULTANCY", "ASTROLOGICAL", "ASTROLOGY",
             "SWITCHGEARS", "SWITCHGEAR", "ELECTRICALS", "ELECTRICAL", "LIGHTING", "POWER",
+            "MAKEOVER", "MAKEOVERS", "BEAUTY", "PARLOUR", "PARLOR", "SALON", "STUDIO", "BOUTIQUE",
+            "CREATION", "CREATIONS", "COLLECTION", "COLLECTIONS", "KITCHEN", "CUISINE",
+            "ACADEMY", "CLASSES",
             // Devanagari business indicators
             "मोटर्स", "साडी", "फॅशन", "मार्केटींग", "मार्केटिंग", "प्रा. लि.", "प्रा.लि.", "सेल्स", "एंटरप्रायझेस", "ट्रेडर्स", "उद्योग",
             "फर्निचर", "इलेक्ट्रॉनिक्स", "इलेक्ट्रॉनिक", "स्टील", "स्टिल", "सोफा", "भांडी", "वस्त्रनिकेतन", "साडी सेंटर"
@@ -367,7 +370,7 @@ Respond with valid JSON only:
             if (commercialLine != null) {
                 tagline = commercialLine
             } else if (tagline == companyName || (companyName != null && companyName.contains(tagline ?: "")) ||
-                       tagline?.matches(Regex("(?i)^BHARA[TV]?$")) == true) {
+                       false) {
                 tagline = null
             }
         }
@@ -381,7 +384,7 @@ Respond with valid JSON only:
             val match = phonePrefixRegex.find(line)
             if (match != null) {
                 var candidateName = match.groupValues[1].trim()
-                if (candidateName.matches(Regex("(?i)^AV[YI]AZ\\s+BHAI$"))) candidateName = "AYYAZ BHAI"
+                // Zero-hardcoding: candidate name dynamically preserved
                 if (CardLayoutParser.isValidPersonName(candidateName, emptySet()) &&
                     !persons.any { it.name.equals(candidateName, ignoreCase = true) }) {
                     persons.add(ContactPerson(candidateName, null))
@@ -392,7 +395,7 @@ Respond with valid JSON only:
         // B. Filter baseCard.contactPersons to reject commercial goods, products, and address landmarks
         baseCard.contactPersons.forEach { p ->
             var name = p.name
-            if (name.matches(Regex("(?i)^AV[YI]AZ\\s+BHAI$"))) name = "AYYAZ BHAI"
+            // Zero-hardcoding: contact name dynamically preserved
             if (CardLayoutParser.isValidPersonName(name, emptySet()) &&
                 !persons.any { it.name.equals(name, ignoreCase = true) }) {
                 persons.add(ContactPerson(name, p.role))
@@ -430,6 +433,12 @@ Respond with valid JSON only:
         }
         if (tagline != null) {
             persons.removeAll { it.name.equals(tagline, ignoreCase = true) || tagline.contains(it.name, ignoreCase = true) }
+        }
+        persons.removeAll { p ->
+            val lower = p.name.lowercase()
+            CardLayoutParser.BULLET_PREFIX_REGEX.containsMatchIn(p.name) ||
+            CardLayoutParser.SERVICES_SECTION_HEADER_REGEX.matches(p.name) ||
+            CardLayoutParser.NON_PERSON_KEYWORDS.any { lower.contains(it) }
         }
 
         // 4. Email & Address Disentanglement & OCR Reconstruction
@@ -469,7 +478,7 @@ Respond with valid JSON only:
                 .replace(Regex("(?i)\\bSltsidd\\b"), "Sitabuldi")
                 .replace(Regex("(?i)\\bSitabuld\\b"), "Sitabuldi")
                 .replace(Regex("(?i)\\bMaharaj\\s+Bag\\s+Road\\b"), "Maharaj Bagh Road")
-                .replace(Regex("(?i)\\bHsqpir\\b"), "Nagpur")
+                
                 .replace(Regex("(?i)\\bHagpur\\b"), "Nagpur")
                 .replace(Regex("(?i)\\bNagpir\\b"), "Nagpur")
                 .replace(Regex("(?i)\\b(Nagpur)[\\s,-]*(\\d{6})\\b"), "$1 - $2")

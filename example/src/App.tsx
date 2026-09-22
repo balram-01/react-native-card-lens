@@ -42,7 +42,6 @@ import type {
   BillDocument,
   DocumentScanResult,
   ThinkingModelDownloadProgress,
-  DeterministicExtractionResult,
 } from 'react-native-card-lens';
 
 // ─── Free, Non-Gated GGUF Models (llama.rn / llama.cpp) ─────────────────────
@@ -566,10 +565,6 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] =
     useState<ThinkingModelDownloadProgress | null>(null);
   const [slmLoading, setSlmLoading] = useState(false);
-  const [hybridResult, setHybridResult] =
-    useState<DeterministicExtractionResult | null>(null);
-  const [isHybridActive, setIsHybridActive] = useState<boolean>(false);
-  const [showResidualModal, setShowResidualModal] = useState<boolean>(false);
 
   const llamaContextRef = useRef<LlamaContext | null>(null);
 

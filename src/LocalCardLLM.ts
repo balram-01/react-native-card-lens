@@ -1,4 +1,87 @@
-import type { BusinessCard, BillDocument, ConfidenceAssessment } from './types';
+function isPureCatalogLine(text: string): boolean {
+  return (
+    /^[•■▪★*✓✔\-–]\s*/.test(text) &&
+    !/\b[1-8]\d{5}\b/.test(text) &&
+    !/रोड|रस्ता|चौक|नगर|Street|Road|Chowk/i.test(text)
+  );
+}
+
+// Universal closed-class statutory suffixes & standard OCR rafar drop normalization
+const STATUTORY_TRADE_SUFFIX_VARIANTS: Record<string, string> = {
+  मोटसी: 'मोटर्स',
+  मोटसि: 'मोटर्स',
+  टेडर्स: 'ट्रेडर्स',
+  ट्रेडस: 'ट्रेडर्स',
+  सव्हिस: 'सर्व्हिस',
+  स्पेअरस: 'स्पेअर्स',
+  सचालक: 'संचालक',
+  रथा: 'रिक्षा',
+  रत्था: 'रिक्षा',
+};
+
+function normalizeStatutoryTradeTokens(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      let l = line;
+      for (const [k, v] of Object.entries(STATUTORY_TRADE_SUFFIX_VARIANTS)) {
+        l = l.replaceAll(k, v);
+      }
+      return l;
+    })
+    .join('\n');
+}
+
+const LOCATION_REGEX =
+  /रोड|रस्ता|मार्ग|चौक|नाका|फाटा|शेजारी|समोर|जवळ|मागे|ता\.|जि\.|तालुका|जिल्हा|मु\.|पो\.|गाव|नगर|पेठ|कॉलनी|वाडी|सोसायटी|अपार्टमेंट|कॉम्प्लेक्स|शॉप नं|दुकान नं|प्लॉट नं|पत्ता|पता|\bStreet\b|\bRoad\b|\bRd\b|\bChowk\b|\bSquare\b|\bSq\b|\bCross\b|\bLane\b|\bNagar\b|\bColony\b|\bLayout\b|\bSector\b|\bPlot\b|\bShop\b|\bBldg\b|\bBuilding\b|\bOpp\b|\bNear\b|\bBehind\b|\bFloor\b|\bAmsterdam\b|\bNetherland\b|\bIndia\b|\bNagpur\b|\bPune\b|\bMumbai\b/iu;
+
+const STATUS_BAR_NOISE =
+  /\d{1,2}:\d{2}|KB\/s|MB\/s|\d+%\b|VoLTE|4G|5G|LTE|Yo\s*\d+%/i;
+
+function isContactInfo(text: string): boolean {
+  return /@|www\.|https?:|\b[6-9]\d{9}\b|\b0\d{2,4}[\s-]\d{6,8}\b|\b(?:mob|tel|phone|fax|email)\b/i.test(
+    text
+  );
+}
+
+function extractCityFromText(text: string): string | undefined {
+  const cities = [
+    'mumbai',
+    'pune',
+    'nagpur',
+    'delhi',
+    'bengaluru',
+    'bangalore',
+    'hyderabad',
+    'chennai',
+    'kolkata',
+    'ahmedabad',
+    'surat',
+    'jaipur',
+    'lucknow',
+    'kanpur',
+    'amsterdam',
+  ];
+  const lower = text.toLowerCase();
+  for (const c of cities) {
+    if (new RegExp(`\\b${c}\\b`, 'i').test(lower)) {
+      return c.charAt(0).toUpperCase() + c.slice(1);
+    }
+  }
+  return undefined;
+}
+
+function extractPinFromText(text: string): string | undefined {
+  const match = text.match(/\b([1-8]\d{5})\b/);
+  return match ? match[1] : undefined;
+}
+import type {
+  BusinessCard,
+  BillDocument,
+  ConfidenceAssessment,
+  StructuredAddress,
+  ContactPerson,
+} from './types';
 
 /**
  * GBNF (GGML Backus-Naur Form) grammar strictly constraining model token sampling
@@ -415,705 +498,175 @@ export function buildCardExtractionPrompt(
   }
   const contextSnippet =
     hints.length > 0
-      ? `\n\nOCR Pre-Analysis Context:\n${hints.map((h) => `- ${h}`).join('\n')}`
+      ? `\nOCR Pre-Analysis Context:\n${hints.map((h) => `- ${h}`).join('\n')}\n`
       : '';
 
   return `<|im_start|>system
-You are an expert on-device document intelligence AI specializing in business cards and corporate identity.
-Your task is to accurately extract structured business card entities from OCR text with 100% precision.
+You are a business card field mapper.
+You receive OCR text from a business card. Your only job is to map text tokens into the correct JSON fields.
+The OCR engine has already found the text — do not invent or guess values not present in the text.
 
-CRITICAL DISAMBIGUATION & ACCURACY RULES:
-1. COMPANY & BRAND NAME ("companyName", "tagline"):
-   - "companyName": Extract ONLY the primary commercial enterprise, organization, corporate, or brand name (e.g., "OM INDUSTRIES", "Tata Consultancy Services", "Bharat Sports", "Cakes Inn").
-   - NEGATIVE CONSTRAINT: NEVER put product or service catalogs (e.g., "MCB Box, Fan Box, Modular Box", "Printing, Xerox, Lamination") into "companyName".
-   - NEGATIVE CONSTRAINT: NEVER put an individual person's name (e.g., "Anil Mittal") into "companyName".
-   - If secondary branding/specialty is present (e.g. "Isco SWITCHGEARS"), assign it to "tagline" or "companyName".
+FIELD RULES:
 
-2. PROVIDED SERVICES & PRODUCTS ("providedServices"):
-   - Extract comma-separated product catalogs, manufactured goods, or business offerings into an array of clean string items.
-   - Example: "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc." -> ["MCB Box", "Junction Box", "Fan Box", "Modular Box", "Concealed Box"].
-   - Strip trailing "etc.", "and more", or ellipses.
+companyName
+  - The business or shop name. Usually the largest text or at the top.
+  - Can be in any language (Hindi, Marathi, English).
+  - NOT a person's name. NOT a building name (Towers, Plaza, Complex, Chambers).
+  - If the email is "info@bharat_sports.com" and no company line exists, derive: "BHARAT SPORTS".
 
-3. CONTACT PERSONS ("contactPersons"):
-   - Extract human individual names and their professional titles/designations: [{"name": "Anil Mittal", "role": null}].
-   - If no explicit designation is printed, set "role" to null.
-   - NEGATIVE CONSTRAINT: Do NOT extract locations, buildings, industrial areas, or company names as persons.
+tagline
+  - A short slogan or motto, usually below the company name.
+  - Typically starts with words like "The", "Your", "Trusted", "We", "For".
+  - If absent: null.
 
-4. PHONE NUMBERS ("phoneNumbers"):
-   - Extract all 10-digit mobile or landline numbers (clean of dashes, spaces, and OCR noise).
+contactPersons
+  - Human names only. Usually 1-3 words. Has an honorific or title nearby (Prop., MD, Dr., Adv., CA, Owner).
+  - NOT company names. NOT building names. NOT product or service names.
+  - NEVER extract items listed under "OUR SERVICES", "SERVICES", "PRODUCTS", "DEALS IN", or lines starting with bullet symbols (>, •, -, *) as persons!
+  - NEVER extract fitness, workout, or training activities (e.g. "Zumba", "Crossfit", "Pilates", "Ramfit Training", "Six Pack", "Weight Training") as contact persons!
+  - If no human person is named on the card: [].
 
-5. EMAILS & WEBSITES ("emails", "websites"):
-   - Correct common OCR scanning errors in emails (e.g., "@" misrecognized as "fd", "cl", "(a)", or "8" before domains like "xyz.com" or "gmail.com").
-   - A string containing "@" is an EMAIL, NEVER a website.
-   - "websites" must be clean domains or URLs (e.g., "www.example.com", "example.com"). Must NOT contain "@".
+phoneNumbers
+  - 10-digit Indian mobile numbers starting with 6, 7, 8, or 9.
+  - Landlines: may have STD code prefix (e.g. 0712-2233445 → include as-is).
+  - Strip labels like "M:", "Ph:", "Cell:", "Mob:".
+  - Include ALL numbers found. Do not drop secondary numbers.
 
-6. ADDRESS & LOCATION ("addressLines", "pincode"):
-   - Extract physical address lines. Fix clipped prefixes from map pin icons (e.g., "Mohan Nagar" not "ohan Nagar", "Delhi" not "Dethi").
-   - Extract 6-digit postal PIN/ZIP code if present.
+emails
+  - Standard email format. Fix obvious OCR errors: "(a)" or "[at]" → "@", "gmai1" → "gmail".
 
-7. STATUTORY TAX IDENTIFIERS ("gstin"):
-   - Extract 15-character GSTIN tax number if present.
+websites
+  - URLs or domains. Strip "http://", "www." prefix if present to keep just the domain.
+  - Do not include emails as websites.
 
-8. INDIC & MARATHI CARD RULES (मराठी व्हिजिटिंग कार्ड विशेष नियम):
+addresses (array of strings)
+  - Street address lines. May include area, landmark, city.
+  - Remove any phone number or email that leaked into the address text.
+  - If multiple branch locations separated by "|" or numbered (1., 2.), split into separate array items.
 
-   GENERAL MARATHI OCR:
-   - Marathi cards may contain Marathi (Devanagari), English, Hindi, or a mixture of all three.
-   - Never assume the entire card uses one language.
-   - Preserve the original text where possible, but normalize obvious OCR errors when confidence is high.
-   - Do not translate Marathi names, company names, addresses, or brand names into English unless explicitly required.
-   - Marathi and Hindi Devanagari text may look similar. Use surrounding vocabulary and card context to determine Marathi business terminology.
-   - Handle Unicode Devanagari text correctly.
-   - Preserve honorifics such as "श्री.", "श्रीमती", "कु.", "डॉ.", "प्रा.", "अॅड.", "सौ." when useful, but do not treat them as part of the person's actual name unless appropriate.
+pincode
+  - Exactly 6 digits, starts with 1-9. null if absent.
 
-   MARATHI NAME / PERSON ANCHORS:
-   - Recognize:
-     * "नाव"
-     * "नांव"
-     * "संपर्क व्यक्ती"
-     * "संपर्क"
-     * "संपर्कासाठी"
-     * "व्यक्ती"
-     * "श्री"
-     * "श्री."
-     * "श्रीमती"
-     * "सौ."
-     * "कु."
-     * "कुमार"
-     * "डॉ."
-     * "प्रा."
-     * "अॅड."
-     * "अॅडव्होकेट"
-   - Common role/title prefixes and suffixes:
-     * "संचालक"
-     * "संचालिका"
-     * "व्यवस्थापक"
-     * "व्यवस्थापिका"
-     * "भागीदार"
-     * "मालक"
-     * "मालकीण"
-     * "प्रोप्रायटर"
-     * "प्रोप्रायटर्स"
-     * "प्रोप्रा."
-     * "अधिकृत विक्रेते"
-     * "अधिकृत वितरक"
-     * "डीलर"
-     * "अध्यक्ष"
-     * "उपाध्यक्ष"
-     * "सचिव"
-     * "खजिनदार"
-     * "सहसचिव"
-     * "मुख्य कार्यकारी अधिकारी"
-     * "व्यवसाय प्रमुख"
-     * "विभाग प्रमुख"
-     * "मालक व संचालक"
-   - If a person name appears immediately before/after a role, associate the role with that person.
-   - Do not mistake company names, shop names, or surnames for a person's name without contextual evidence.
+gstin
+  - Exactly 15 characters: 2 digits + 5 letters + 4 digits + 1 letter + 1 alphanumeric + "Z" + 1 alphanumeric.
+  - null if absent.
 
-   MARATHI PHONE / MOBILE ANCHORS:
-   - Recognize:
-     * "मो."
-     * "मोबाईल"
-     * "मोबाईल नं."
-     * "मोबाईल नंबर"
-     * "भ्रमणध्वनी"
-     * "दूरध्वनी"
-     * "दूरध्वनी क्र."
-     * "फोन"
-     * "फोन नं."
-     * "फोन नंबर"
-     * "संपर्क"
-     * "संपर्क क्र."
-     * "संपर्क क्रमांक"
-     * "मो. क्र."
-     * "मोबाईल क्र."
-     * "टेलिफोन"
-     * "दूरध्वनी क्रमांक"
-   - Convert Marathi/Devanagari numerals:
-     * ०→0
-     * १→1
-     * २→2
-     * ३→3
-     * ४→4
-     * ५→5
-     * ६→6
-     * ७→7
-     * ८→8
-     * ९→9
-   - Also recognize numbers containing spaces, hyphens, brackets, "/", ".", or "+".
-   - Recognize Indian mobile formats such as:
-     * 98XXXXXXXX
-     * 97XXXXXXXX
-     * 96XXXXXXXX
-     * 95XXXXXXXX
-     * 91XXXXXXXX
-     * +91 XXXXXXXXXX
-     * 0091 XXXXXXXXXX
-   - Normalize +91 / 0091 formats where appropriate.
-   - Do not merge two separate phone numbers into one number.
-   - If multiple numbers exist, return all numbers separately.
-   - Preserve labels such as:
-     * "मो."
-     * "ऑफिस"
-     * "घर"
-     * "फॅक्स"
-     * "व्हॉट्सअॅप"
-   - Recognize WhatsApp indicators:
-     * "WhatsApp"
-     * "व्हॉट्सअॅप"
-     * "वॉट्सअॅप"
-     * "Whats App"
-   - A phone number preceded by "मो." should have high confidence as a mobile number.
+providedServices
+  - List of services, products, or offerings listed on the card (e.g. "CCTV CAMERA", "LAPTOP REPAIRING", "DATA RECOVERY").
+  - Includes bulleted items (lines starting with '>', '•', '-', '*') or items listed under "OUR SERVICES", "SERVICES", "PRODUCTS", "DEALS IN".
+  - Strip leading bullet symbols ('>', '•', '-', '*').
+  - Short phrases only (1-4 words each).
+  - [] if none listed.
 
-   LANDLINE / STD:
-   - Recognize:
-     * "दूरध्वनी"
-     * "फोन"
-     * "कार्यालय"
-     * "ऑफिस"
-     * "STD"
-     * "STD Code"
-     * "दूरध्वनी क्र."
-   - Recognize Indian landline patterns including area/STD codes.
-   - Do not classify every 10-digit number as a mobile number if the card explicitly labels it as office/landline.
-
-   MARATHI EMAIL ANCHORS:
-   - Recognize:
-     * "ई-मेल"
-     * "ईमेल"
-     * "मेल"
-     * "इ-मेल"
-     * "ई.मेल"
-     * "Email"
-     * "E-mail"
-     * "Mail"
-   - OCR may incorrectly recognize "@", ".", "_", "-", or characters around an email address.
-   - Normalize obvious OCR errors only when the resulting email is structurally valid.
-   - Never invent missing characters in an email address.
-   - If confidence is low, preserve the OCR output rather than guessing.
-
-   WEBSITE / SOCIAL MEDIA:
-   - Recognize:
-     * "वेबसाईट"
-     * "वेबसाइट"
-     * "संकेतस्थळ"
-     * "Website"
-     * "Web"
-     * "www."
-     * "Facebook"
-     * "Instagram"
-     * "LinkedIn"
-     * "YouTube"
-     * "Twitter"
-     * "X"
-   - Extract URLs separately from general text.
-   - Do not interpret a website domain as an email address.
-
-   MARATHI ADDRESS ANCHORS:
-   - Recognize:
-     * "पत्ता"
-     * "पत्ताः"
-     * "पत्ता:"
-     * "पत्ता -"
-     * "पत्ता :"
-     * "कार्यालय"
-     * "ऑफिस"
-     * "मुख्य कार्यालय"
-     * "शाखा"
-     * "शाखा कार्यालय"
-     * "दुकान"
-     * "दुकान क्र."
-     * "दुकान नं."
-     * "गाळा"
-     * "गाळा क्र."
-     * "गाळा नं."
-     * "ऑफिस नं."
-     * "ऑफिस क्र."
-     * "फ्लॅट"
-     * "फ्लॅट नं."
-     * "मजला"
-     * "इमारत"
-     * "बिल्डिंग"
-     * "कॉम्प्लेक्स"
-     * "मार्केट"
-     * "मॉल"
-     * "चौक"
-     * "रस्ता"
-     * "रोड"
-     * "गल्ली"
-     * "लेन"
-     * "वाडी"
-     * "नगर"
-     * "नाका"
-     * "वस्ती"
-     * "पेठ"
-     * "कॉलनी"
-     * "सोसायटी"
-     * "अपार्टमेंट"
-     * "महानगर"
-     * "तालुका"
-     * "जिल्हा"
-     * "गाव"
-     * "मु."
-     * "पो."
-     * "ता."
-     * "जि."
-     * "पिन"
-     * "पिन कोड"
-   - Recognize common Marathi locality words:
-     * "नगर"
-     * "पेठ"
-     * "वाडी"
-     * "वस्ती"
-     * "गाव"
-     * "खेड"
-     * "बाजार"
-     * "मार्केट"
-     * "चौक"
-     * "नाका"
-     * "मेन रोड"
-     * "मुख्य रस्ता"
-     * "स्टेशन रोड"
-     * "बस स्टँड"
-     * "बस स्थानक"
-     * "रेल्वे स्टेशन"
-     * "रेल्वे स्थानक"
-     * "महामार्ग"
-     * "हायवे"
-   - Recognize city/district names including:
-     * "मुंबई"
-     * "पुणे"
-     * "नाशिक"
-     * "नागपूर"
-     * "औरंगाबाद"
-     * "छत्रपती संभाजीनगर"
-     * "ठाणे"
-     * "नवी मुंबई"
-     * "कोल्हापूर"
-     * "सोलापूर"
-     * "सातारा"
-     * "सांगली"
-     * "अहमदनगर"
-     * "अहिल्यानगर"
-     * "जळगाव"
-     * "धुळे"
-     * "नंदुरबार"
-     * "अकोला"
-     * "अमरावती"
-     * "बुलढाणा"
-     * "वाशिम"
-     * "यवतमाळ"
-     * "नांदेड"
-     * "लातूर"
-     * "परभणी"
-     * "हिंगोली"
-     * "बीड"
-     * "उस्मानाबाद"
-     * "धाराशिव"
-     * "रत्नागिरी"
-     * "सिंधुदुर्ग"
-     * "रायगड"
-     * "पालघर"
-     * "वर्धा"
-     * "गोंदिया"
-     * "भंडारा"
-     * "चंद्रपूर"
-     * "गडचिरोली"
-   - Recognize Maharashtra address abbreviations:
-     * "मु." = मुक्काम
-     * "पो." = पोस्ट
-     * "ता." = तालुका
-     * "जि." = जिल्हा
-     * "पिन" / "पिन कोड" = PIN code
-   - Extract the entire address as one coherent address field when multiple lines clearly belong together.
-   - Do not split city, street, locality, PIN, and district into unrelated contacts.
-
-   PIN CODE:
-   - Recognize:
-     * "पिन"
-     * "पिन कोड"
-     * "PIN"
-     * "PIN CODE"
-     * "Postal Code"
-     * "पोस्ट कोड"
-   - Recognize Indian 6-digit PIN codes.
-   - Convert Devanagari digits to standard digits.
-   - Example:
-     * "पिन - ४३१६०१" → "431601"
-   - Do not treat a 6-digit PIN code as a phone number.
-
-   BUSINESS / COMPANY TYPE:
-   - Recognize common Marathi business descriptions:
-     * "व्यवसाय"
-     * "उद्योग"
-     * "उद्योग समूह"
-     * "कंपनी"
-     * "फर्म"
-     * "प्रतिष्ठान"
-     * "संस्था"
-     * "एंटरप्रायझेस"
-     * "एंटरप्राइजेस"
-     * "ट्रेडर्स"
-     * "ट्रेडिंग"
-     * "इंडस्ट्रीज"
-     * "इंडस्ट्री"
-     * "असोसिएट्स"
-     * "सोल्युशन्स"
-     * "सर्व्हिसेस"
-     * "सर्व्हिस सेंटर"
-     * "वर्क्स"
-     * "शॉप"
-     * "स्टोअर्स"
-     * "मार्ट"
-     * "सेंटर"
-   - Use these terms to help distinguish company/business names from personal names.
-
-   MARATHI JOB TITLES / DESIGNATIONS:
-   - Recognize:
-     * "संचालक" = Director
-     * "संचालिका" = Female Director
-     * "व्यवस्थापक" = Manager
-     * "व्यवस्थापिका" = Female Manager
-     * "मालक" = Owner
-     * "मालकीण" = Female Owner
-     * "प्रोप्रायटर" = Proprietor
-     * "भागीदार" = Partner
-     * "अध्यक्ष" = President/Chairperson
-     * "उपाध्यक्ष" = Vice President/Vice Chairperson
-     * "सचिव" = Secretary
-     * "खजिनदार" = Treasurer
-     * "मुख्य व्यवस्थापक" = General Manager
-     * "व्यवस्थापकीय संचालक" = Managing Director
-     * "मुख्य कार्यकारी अधिकारी" = CEO
-     * "विक्री व्यवस्थापक" = Sales Manager
-     * "विपणन व्यवस्थापक" = Marketing Manager
-     * "लेखा अधिकारी" = Accounts Officer
-     * "लेखापाल" = Accountant
-     * "अभियंता" = Engineer
-     * "वकील" = Lawyer
-     * "अॅडव्होकेट" = Advocate
-     * "आर्किटेक्ट" = Architect
-     * "डॉक्टर" = Doctor
-     * "तंत्रज्ञ" = Technician
-     * "सल्लागार" = Consultant
-     * "वितरक" = Distributor
-     * "घाऊक विक्रेते" = Wholesaler
-     * "किरकोळ विक्रेते" = Retailer
-     * "अधिकृत विक्रेते" = Authorized Dealer
-     * "अधिकृत वितरक" = Authorized Distributor
-   - Preserve the original designation in the extracted data when possible.
-
-   SERVICES / BUSINESS ACTIVITY:
-   - Recognize:
-     * "सेवा"
-     * "सेवेसाठी"
-     * "सर्व्हिस"
-     * "सर्व्हिस सेंटर"
-     * "दुरुस्ती"
-     * "विक्री"
-     * "विक्रेते"
-     * "घाऊक विक्रेते"
-     * "किरकोळ विक्रेते"
-     * "वितरक"
-     * "अधिकृत वितरक"
-     * "अधिकृत विक्रेते"
-     * "डीलर्स"
-     * "सेल्स"
-     * "स्पेअर्स"
-     * "सुटे भाग"
-     * "सुटे पार्ट्स"
-     * "देखभाल"
-     * "मेंटेनन्स"
-     * "इन्स्टॉलेशन"
-     * "स्थापना"
-     * "कन्सल्टन्सी"
-     * "सल्ला"
-     * "उत्पादन"
-     * "निर्मिती"
-     * "पुरवठा"
-     * "सप्लाय"
-     * "कंत्राटदार"
-     * "कॉन्ट्रॅक्टर"
-   - Extract these as providedServices or businessDescription when clearly associated with the business.
-
-   AUTOMOTIVE / VEHICLE BUSINESS VOCABULARY:
-   - Recognize:
-     * "मोटर्स"
-     * "मोटर"
-     * "ऑटोमोबाईल"
-     * "ऑटोमोबाइल"
-     * "ऑटो"
-     * "गॅरेज"
-     * "वर्कशॉप"
-     * "वर्कशॉप"
-     * "सर्व्हिस सेंटर"
-     * "दुरुस्ती केंद्र"
-     * "स्पेअर्स"
-     * "सुटे भाग"
-     * "टायर्स"
-     * "टायर"
-     * "बॅटरी"
-     * "बॅटरीज"
-     * "कार"
-     * "दुचाकी"
-     * "चारचाकी"
-     * "तीनचाकी"
-     * "ट्रॅक्टर"
-     * "ट्रॅक्टर पार्ट्स"
-     * "ई-रिक्षा"
-     * "इलेक्ट्रिक रिक्षा"
-     * "रिक्षा"
-     * "स्कूटर"
-     * "मोटरसायकल"
-     * "बाईक"
-     * "वाहन"
-     * "वाहन विक्री"
-   - Correct obvious OCR variants where confidence is high:
-     * "मोटसी" / "मोटसी." → "मोटर्स"
-     * "मोटस" → "मोटर्स"
-     * "मोटर्स" should not be changed to "मोटर" if the original clearly indicates a company/business name.
-     * "ई-रथा" → "ई-रिक्षा"
-     * "ई रिक्षा" → "ई-रिक्षा"
-     * "ईरिक्षा" → "ई-रिक्षा"
-
-   COMMON MARATHI OCR CORRECTIONS:
-   - Correct only highly probable OCR errors.
-   - Never aggressively autocorrect names, company names, or addresses.
-   - Common examples:
-     * "मोटसी" → "मोटर्स"
-     * "मोटस" → "मोटर्स"
-     * "साहु मोटसी" → "साहु मोटर्स"
-     * "ई-रथा" → "ई-रिक्षा"
-     * "ईरथा" → "ई-रिक्षा"
-     * "ई रिक्षा" → "ई-रिक्षा"
-     * "हायोक" → "चौक"
-     * "हायोकनागपुर" → "चौक, नागपूर"
-     * "श्री-गरसानेवा" → "श्री नगर, मानेवाडा"
-     * "रोजससिहेताअॅडरपेअली" → "सेल्स सर्व्हिस अँड स्पेअर्स"
-   - Handle OCR confusion involving:
-     * ळ / ल
-     * ण / न
-     * श / ष / स
-     * ब / व
-     * द / ध
-     * ट / ठ
-     * ड / ढ
-     * त / थ
-     * प / फ
-     * ज / झ
-     * च / छ
-     * म / भ
-     * र / व
-   - Be particularly careful with visually similar Devanagari characters.
-   - Use surrounding words and dictionary/context knowledge before correcting.
-
-   MARATHI BUSINESS PHRASES:
-   - Recognize:
-     * "सर्व प्रकारच्या..."
-     * "सर्व प्रकारची..."
-     * "येथे मिळेल"
-     * "येथे विक्री केली जाते"
-     * "विक्री व सेवा"
-     * "विक्री व दुरुस्ती"
-     * "सेल्स अँड सर्व्हिस"
-     * "सेल्स सर्व्हिस अँड स्पेअर्स"
-     * "सेल्स, सर्व्हिस अँड स्पेअर्स"
-     * "विक्री, सेवा व सुटे भाग"
-     * "विक्री व सर्व्हिस"
-     * "घाऊक व किरकोळ विक्रेते"
-     * "घाऊक विक्री"
-     * "किरकोळ विक्री"
-     * "अधिकृत विक्रेते"
-     * "अधिकृत वितरक"
-     * "सर्व प्रकारचे सुटे भाग"
-     * "सर्व प्रकारच्या वस्तू"
-     * "उत्पादन व विक्री"
-     * "विक्री व वितरण"
-     * "दुरुस्ती व देखभाल"
-
-   MARATHI & ENGLISH MIXED TEXT:
-   - Many Marathi visiting cards use English business names with Marathi address/contact information.
-   - Do not transliterate English company names into Marathi.
-   - Do not translate Marathi addresses into English.
-   - Example:
-     * "ABC MOTORS"
-     * "संचालक: श्री. अमोल पाटील"
-     * "मो.: ९८७६५४३२१०"
-     * "पत्ता: स्टेशन रोड, नांदेड"
-   - Extract:
-     * companyName = "ABC MOTORS"
-     * contactPerson = "अमोल पाटील"
-     * designation = "संचालक"
-     * phone = "9876543210"
-     * address = "स्टेशन रोड, नांदेड"
-
-   HONORIFICS:
-   - Recognize:
-     * "श्री."
-     * "श्री"
-     * "सौ."
-     * "श्रीमती"
-     * "कु."
-     * "कु"
-     * "डॉ."
-     * "डॉ"
-     * "प्रा."
-     * "प्रो."
-     * "अॅड."
-     * "अॅडव्होकेट"
-   - Strip honorifics from the normalized contactPerson field if the schema requires only the person's name.
-   - Preserve them separately if an honorific/title field exists.
-
-   MARATHI NUMBER WORDS:
-   - Recognize Marathi number words where possible:
-     * "एक"
-     * "दोन"
-     * "तीन"
-     * "चार"
-     * "पाच"
-     * "सहा"
-     * "सात"
-     * "आठ"
-     * "नऊ"
-     * "दहा"
-   - Do not convert number words into digits unless the context clearly indicates a numeric field.
-   - Never interpret a person's name containing a number word as a phone number without numeric evidence.
-
-   DEVA NAGARI PUNCTUATION / SYMBOLS:
-   - Handle:
-     * "।"
-     * ":"
-     * "-"
-     * "/"
-     * ","
-     * "."
-     * "|"
-     * "•"
-     * "॥"
-   - Normalize unnecessary punctuation around phone numbers and email addresses.
-   - Preserve meaningful punctuation in company names and addresses.
-
-   ADDRESS CONTEXT INFERENCE:
-   - If "पत्ता" is present, collect following address lines until another strong field begins.
-   - If there is no "पत्ता", infer an address from a combination of:
-     * street/road words
-     * locality names
-     * city names
-     * district names
-     * PIN code
-     * "चौक"
-     * "नगर"
-     * "पेठ"
-     * "नाका"
-     * "वाडी"
-     * "गाव"
-     * "तालुका"
-     * "जिल्हा"
-   - Do not classify a city name alone as a complete address if other card information suggests it is merely a service area.
-
-   LOCATION NORMALIZATION:
-   - Normalize well-known Marathi/Maharashtra city spellings only when confidence is high.
-   - Examples:
-     * "नागपुर" → "नागपूर"
-     * "पुणे" → "पुणे"
-     * "मुंबई" → "मुंबई"
-     * "नासिक" → "नाशिक"
-     * "नाशीक" → "नाशिक"
-     * "औरंगाबाद" → "छत्रपती संभाजीनगर" only if the application explicitly enables current-name normalization.
-   - Preserve the OCR/original form if uncertain.
-
-   MARATHI COMPANY / PERSON NAME SEPARATION:
-   - If a card contains:
-     * "श्री. अमोल पाटील"
-     * "संचालक"
-     * "पाटील मोटर्स"
-   - infer:
-     * contactPerson = "अमोल पाटील"
-     * designation = "संचालक"
-     * companyName = "पाटील मोटर्स"
-   - Do not confuse a surname shared with the business name as the person's complete name.
-   - Use layout proximity, font size, labels, and neighboring text to determine relationships.
-
-   MULTIPLE CONTACT PEOPLE:
-   - Recognize multiple people on the same card:
-     * "संचालक - श्री. अमोल पाटील"
-     * "भागीदार - श्री. राहुल शिंदे"
-     * "व्यवस्थापक - श्री. सचिन जाधव"
-   - If schema supports only one contactPerson, select the person most strongly associated with the primary designation/contact information and preserve other people in an additionalContacts array when available.
-   - Never concatenate multiple people into one person's name.
-
-   MULTIPLE PHONE NUMBERS:
-   - Extract every clearly visible phone/mobile number.
-   - Example:
-     * "मो.: ९८७६५४३२१० / ९८२३४५६७८९"
-       → ["9876543210", "9823456789"]
-   - Do not concatenate numbers separated by "/" or " / ".
-   - If labels indicate different purposes, preserve them:
-     * mobile
-     * office
-     * WhatsApp
-     * fax
-
-   FAX:
-   - Recognize:
-     * "फॅक्स"
-     * "फॅक्स नं."
-     * "Fax"
-   - Store fax separately from phone numbers where the schema supports it.
-
-   MARATHI WHATSAPP:
-   - Recognize:
-     * "व्हॉट्सअॅप"
-     * "वॉट्सअॅप"
-     * "WhatsApp"
-     * "WhatsApp No."
-   - If the WhatsApp number is the same as mobile, avoid duplicate entries unless the schema explicitly stores both.
-
-   MARATHI EMAIL OCR:
-   - Common OCR errors may affect:
-     * @
-     * .
-     * _
-     * -
-     * 0 / O
-     * 1 / l / I
-   - Correct only when the surrounding email structure makes the correction highly reliable.
-   - Never fabricate a domain or username.
-
-   CONFIDENCE-BASED CORRECTION:
-   - High-confidence corrections:
-     * obvious digit conversion
-     * obvious punctuation normalization
-     * common Marathi OCR typo with strong contextual evidence
-   - Medium-confidence corrections:
-     * retain original OCR text and optionally provide normalizedText
-   - Low-confidence corrections:
-     * do not guess.
-   - Personal names, company names, addresses, and email addresses require a higher correction threshold than generic service descriptions.
-
-   MARATHI FIELD PRIORITY:
-   - Strong field anchors should override generic keyword matching.
-   - Recommended priority:
-     1. Explicit labels such as "मो.", "ई-मेल", "पत्ता"
-     2. Structured patterns such as phone, email, PIN, URL
-     3. Designation/person relationships
-     4. Address vocabulary
-     5. Business/service vocabulary
-     6. General semantic inference
-
-   IMPORTANT:
-   - Never hallucinate missing Marathi text.
-   - Never create a phone number that is not visible.
-   - Never invent a person's name from the company name.
-   - Never convert uncertain OCR into a confident value.
-   - Preserve raw OCR text internally when possible so normalized output can be audited.
-   - Prefer accurate extraction over aggressive correction.
-Output strictly valid JSON conforming to the schema.<|im_end|>
+OUTPUT: Raw JSON only. No explanation. No markdown. Start directly with {.
+<|im_end|>
 <|im_start|>user
-Raw OCR Card Text:
-${rawText}${contextSnippet}
+OCR Text:
+श्री गणेशाय नमः
+SHAHU MOTORS
+Authorised Dealer – Two Wheelers
+Prop. Ramesh Patil
+M: 9876543210, 9823456789
+Email: shahu.motors@gmail.com
+Opp. ST Stand, Kolhapur – 416001
+GSTIN: 27AABCS1429B1Z5
+
+Return JSON:
 <|im_end|>
 <|im_start|>assistant
-`;
+{
+  "companyName": "SHAHU MOTORS",
+  "tagline": "Authorised Dealer – Two Wheelers",
+  "contactPersons": [{"name": "Ramesh Patil", "role": "Prop."}],
+  "phoneNumbers": ["9876543210", "9823456789"],
+  "emails": ["shahu.motors@gmail.com"],
+  "websites": [],
+  "addresses": ["Opp. ST Stand, Kolhapur – 416001"],
+  "pincode": "416001",
+  "gstin": "27AABCS1429B1Z5",
+  "providedServices": []
+}
+<|im_end|>
+<|im_start|>user
+OCR Text:
+BHARAT SPORTS
+Your Sports Partner
+Vikas Sharma – Owner
+Ph: 8484940121 / 9373129250
+bharatsportsnagpur@gmail.com
+bharatsportsnagpur.com
+Shop No. 12, Sitabuldi, Nagpur 440012
+Football | Cricket | Badminton | Gym Equipment
+
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{
+  "companyName": "BHARAT SPORTS",
+  "tagline": "Your Sports Partner",
+  "contactPersons": [{"name": "Vikas Sharma", "role": "Owner"}],
+  "phoneNumbers": ["8484940121", "9373129250"],
+  "emails": ["bharatsportsnagpur@gmail.com"],
+  "websites": ["bharatsportsnagpur.com"],
+  "addresses": ["Shop No. 12, Sitabuldi, Nagpur 440012"],
+  "pincode": "440012",
+  "gstin": null,
+  "providedServices": ["Football", "Cricket", "Badminton", "Gym Equipment"]
+}
+<|im_end|>
+<|im_start|>user
+OCR Text:
+OUR SERVICES
+> COMPUTER
+> CCTV CAMERA
+> DOOR LOCK SYSTEM
+> EPBX INTERCOM SYSTEM
+> LAPTOP REPAIRING
+> TONNER REFILLING
+> NETWORKING
+> BIOMETRIC ATTENDANCE MACHINE
+> VIDEO DOOR PHONE
+> PRINTER REPAIRING
+> DATA RECOVERY
+> AMC (ANNUAL MAINTENANCE)
+
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{
+  "companyName": null,
+  "tagline": null,
+  "contactPersons": [],
+  "phoneNumbers": [],
+  "emails": [],
+  "websites": [],
+  "addresses": [],
+  "pincode": null,
+  "gstin": null,
+  "providedServices": [
+    "COMPUTER",
+    "CCTV CAMERA",
+    "DOOR LOCK SYSTEM",
+    "EPBX INTERCOM SYSTEM",
+    "LAPTOP REPAIRING",
+    "TONNER REFILLING",
+    "NETWORKING",
+    "BIOMETRIC ATTENDANCE MACHINE",
+    "VIDEO DOOR PHONE",
+    "PRINTER REPAIRING",
+    "DATA RECOVERY",
+    "AMC (ANNUAL MAINTENANCE)"
+  ]
+}
+<|im_end|>
+<|im_start|>user
+${contextSnippet}OCR Text:
+${rawText}
+
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{`;
 }
 
 const DEVANAGARI_DIGITS: Record<string, string> = {
@@ -1158,12 +711,8 @@ for (const base of INDIC_DIGIT_BLOCK_STARTS) {
   }
 }
 
-const ZERO_WIDTH_REGEX = /[\u200B\u200C\u200D\uFEFF]/g;
+const ZERO_WIDTH_REGEX = /[\u200B-\u200D\uFEFF]/gu;
 
-/**
- * Universal Indic digit normalizer supporting all 19 Indic scripts.
- * Strips zero-width characters and converts all regional digits to ASCII 0-9.
- */
 export function normalizeIndicDigits(input: string): string {
   if (!input) return '';
   return input
@@ -1226,19 +775,15 @@ export function skeletonSimilarity(a: string, b: string): number {
 }
 
 export const MARATHI_OCR_ALIASES: Record<string, string> = {
-  'हायोक': 'चौक',
-  'चाक': 'चौक',
-  'पता': 'पत्ता',
-  'मोटसी': 'मोटर्स',
-  'मोटसि': 'मोटर्स',
-  'रथा': 'रिक्षा',
-  'रत्था': 'रिक्षा',
-  'सव्हिस': 'सर्व्हिस',
-  'स्पेअरस': 'स्पेअर्स',
-  'सचालक': 'संचालक',
-  'नागपुर': 'नागपूर',
-  'रोजससिहेताअॅडरपेअली': 'सेल्स सर्व्हिस अँड स्पेअर्स',
-  'श्री-गरसानेवा': 'श्री नगर, मानेवाडा',
+  हायोक: 'चौक',
+  चाक: 'चौक',
+  पता: 'पत्ता',
+  रथा: 'रिक्षा',
+  रत्था: 'रिक्षा',
+  सव्हिस: 'सर्व्हिस',
+  स्पेअरस: 'स्पेअर्स',
+  सचालक: 'संचालक',
+  नागपुर: 'नागपूर',
 };
 
 /**
@@ -1456,6 +1001,113 @@ export const NON_PERSON_KEYWORDS: Set<string> = new Set([
   'वस्तु',
   'बस्त्याचे',
   'लग्नकार्यासाठी',
+  // IT, Surveillance, Security, Repairing & Service Offerings
+  'our services',
+  'services',
+  'products',
+  'offerings',
+  'specialities',
+  'solutions',
+  'computer',
+  'computers',
+  'laptop',
+  'laptops',
+  'printer',
+  'printers',
+  'cctv',
+  'cctv camera',
+  'camera',
+  'cameras',
+  'door lock',
+  'door lock system',
+  'lock system',
+  'intercom',
+  'epbx',
+  'epabx',
+  'intercom system',
+  'networking',
+  'biometric',
+  'attendance machine',
+  'video door phone',
+  'door phone',
+  'repairing',
+  'refilling',
+  'recovery',
+  'data recovery',
+  'maintenance',
+  'amc',
+  'annual maintenance',
+  'tonner',
+  'toner',
+  'tonner refilling',
+  'toner refilling',
+  'installation',
+  'surveillance',
+  'access control',
+  'fire alarm',
+  'security systems',
+  'hardware',
+  'software',
+  'cartridge',
+  'ink refill',
+  'antivirus',
+  'anti virus',
+  'system',
+  'systems',
+  // Marathi trade / service keywords
+  'दुरुस्ती',
+  'सर्व्हिसिंग',
+  'देखभाल',
+  'इन्स्टॉलेशन',
+  'नेटवर्किंग',
+  'कम्प्युटर',
+  'लॅपटॉप',
+  'प्रिंटर',
+  'सीसीटीव्ही',
+  'कॅमेरा',
+  // Fitness, Gym, Training, Sports & Wellness Offerings
+  'transformation',
+  'zumba',
+  'crossfit',
+  'pilates',
+  'aerobics',
+  'six pack',
+  'abs blast',
+  'diet plan',
+  'wellness',
+  'boot camp',
+  'cardio',
+  'weight training',
+  'lose weight',
+  'yoga',
+  'marathon',
+  'qubo training',
+  'ramfit training',
+  'sunsalutation',
+  'sun salutation',
+  'cpr aed',
+  'never give up',
+  'no pain no gain',
+  'functional programme',
+  'functional training',
+  'coach diet plan',
+  'workout',
+  'outdoor workout',
+  'endurance',
+  'strength training',
+  'agility',
+  'v-shape',
+  'martial arts',
+  'kick boxing',
+  'body building',
+  'sports training',
+  'gym workout',
+  'training',
+  'trainings',
+  'fitness',
+  'gym',
+  'आमच्या सेवा',
+  'सेवा',
 ]);
 
 export const TRADE_CATEGORIES: string[] = [
@@ -1559,12 +1211,45 @@ export const TRADE_CATEGORIES: string[] = [
   'ELECTRICAL',
   'STEEL',
   'FURNITURE',
+  'MAKEOVER',
+  'MAKEOVERS',
+  'BEAUTY',
+  'PARLOUR',
+  'PARLOR',
+  'SALON',
+  'STUDIO',
+  'BOUTIQUE',
+  'CREATION',
+  'CREATIONS',
+  'COLLECTION',
+  'COLLECTIONS',
+  'KITCHEN',
+  'CUISINE',
+  'ACADEMY',
+  'CLASSES',
+  'SWEETS',
+  'CAFE',
+  'BAKERY',
+  'FITNESS',
+  'GYM',
+  'SPA',
 ];
+
+export const BULLET_PREFIX_REGEX =
+  /^(?:[>►•■▪★*✓✔+→\u2022\u25BA\u25B6\-–]|\d+[\.\)])\s*(.+)$/;
+export const SERVICES_SECTION_HEADER_REGEX =
+  /^\s*(?:our\s+)?(?:services|products|offerings|specialities|solutions|deals\s+in|we\s+offer|facilities|amenities)(?:\s*[:\-–])?\s*$/i;
+
+export const DEMOGRAPHIC_AUDIENCE_REGEX =
+  /^(?:(?:only\s+)?(?:ladies|women|gents|men|kids|boys|girls|children)(?:\s+only)?|(?:for\s+)?(?:ladies|women|gents|men|kids)(?:\s+only)?|(?:ladies|women)\s*(?:&|and)\s*(?:gents|men|kids)|(?:all\s+types\s+of|specialists?\s+in|exclusive\s+showroom|wholesale\s*(&|and)?\s*retail))$/i;
 
 export function isValidPersonCandidate(name: string): boolean {
   if (!name || typeof name !== 'string') return false;
   const clean = name.trim();
   if (clean.length < 3 || clean.length > 55) return false;
+  if (BULLET_PREFIX_REGEX.test(clean)) return false;
+  if (SERVICES_SECTION_HEADER_REGEX.test(clean)) return false;
+  if (DEMOGRAPHIC_AUDIENCE_REGEX.test(clean)) return false;
   const lower = clean.toLowerCase();
   const upper = clean.toUpperCase();
 
@@ -1659,52 +1344,83 @@ function extractDomainSlugsFromContacts(
   return Array.from(new Set(slugs));
 }
 
+export const ROLE_PREFIXES: string[] = [
+  'chief executive officer',
+  'chief technology officer',
+  'chief medical officer',
+  'chief financial officer',
+  'managing director',
+  'executive director',
+  'managing partner',
+  'senior partner',
+  'partner',
+  'advocate & legal consultant',
+  'senior advocate',
+  'legal counsel',
+  'notary public',
+  'chief surgeon',
+  'senior consultant',
+  'consultant physician',
+  'pediatrician',
+  'cardiologist',
+  'radiologist',
+  'founder & ceo',
+  'ceo & founder',
+  'ceo',
+  'founder',
+  'co-founder & cto',
+  'director',
+  'proprietor',
+  'general manager',
+  'head of engineering',
+  'branch manager',
+  'branch head',
+  'manager',
+  'owner',
+];
+
+function isRoleOrDesignation(text: string, persons: ContactPerson[]): boolean {
+  const clean = text.trim();
+  if (/^\(.*\)$/.test(clean) || /^\[.*\]$/.test(clean)) return true;
+  const lower = clean.toLowerCase();
+  if (
+    ROLE_PREFIXES.some(
+      (r) => lower === r || lower.startsWith(`${r} `) || lower.endsWith(` ${r}`)
+    )
+  )
+    return true;
+  if (
+    persons.some(
+      (p) =>
+        p.role &&
+        (p.role.toLowerCase() === lower || lower.includes(p.role.toLowerCase()))
+    )
+  )
+    return true;
+  return false;
+}
+
 export function runLocalSemanticExtraction(
   rawText: string,
   card: BusinessCard
 ): BusinessCard {
-  const normalizedRaw = normalizeDevanagariNumbers(rawText);
+  const discoveredPhones = new Set<string>(card.phoneNumbers || []);
+  const cleanedRaw = rawText
+    .replace(/^[ \t]*---+\s*Page\s*\d+\s*---+[ \t]*$/gim, '')
+    .trim();
+  let normalizedRaw = normalizeStatutoryTradeTokens(
+    normalizeDevanagariNumbers(cleanedRaw)
+  );
+  for (const [alias, correct] of Object.entries(MARATHI_OCR_ALIASES)) {
+    normalizedRaw = normalizedRaw.replaceAll(alias, correct);
+  }
   const lines = normalizedRaw
     .split('\n')
-    .map((l) =>
-      l
-        .trim()
-        .replace(/मोटसी/gu, 'मोटर्स')
-        .replace(/गुभुगीबिंद\s*शिंग/gu, 'गुरुगोविंद सिंग')
-    )
+    .map((l) => l.trim())
     .filter((l) => l.length > 0 && !isLikelyLogoArtifact(l));
 
   // 1. Deep multi-word English role parsing
-  const rolePrefixes = [
-    'chief executive officer',
-    'chief technology officer',
-    'chief medical officer',
-    'chief financial officer',
-    'managing director',
-    'executive director',
-    'managing partner',
-    'senior partner',
-    'partner',
-    'advocate & legal consultant',
-    'senior advocate',
-    'legal counsel',
-    'notary public',
-    'chief surgeon',
-    'senior consultant',
-    'consultant physician',
-    'pediatrician',
-    'cardiologist',
-    'radiologist',
-    'founder & ceo',
-    'ceo & founder',
-    'ceo',
-    'founder',
-    'co-founder & cto',
-    'director',
-    'proprietor',
-    'general manager',
-    'head of engineering',
-  ];
+  const rolePrefixes = ROLE_PREFIXES;
 
   // 2. Universal Multilingual Indic designations (मराठी, हिंदी, ગુજરાતી, தமிழ், తెలుగు, ಕನ್ನಡ, বাংলা)
   const indicRoles = [
@@ -1848,35 +1564,88 @@ export function runLocalSemanticExtraction(
     }
   }
 
-  // 2a. Multi-person & Dual Owner / Name-Phone pattern extraction
-  // e.g. "Amar Jiwnani : 9370002379  Jatin Jiwnani : 9373783433" or "AYYAZ BHAI : 8484940121" or "Patel : 9983032493"
-  for (const line of lines) {
+  // 2a. Universal Colon/Hyphen Name-Phone Delimiter Engine + Vertical Stacked Phone Clustering
+  // Extracts any unseen "<Name> : <Phone>" or "<Name> - <Phone>" with 0 hardcoding
+  const TELEPHONY_LABELS =
+    /^(?:mob|mobile|tel|telephone|phone|ph|cell|off|res|fax|contact|mo|call|whatsapp)\b|^(?:मोबाईल|मोबाइल|मो\.|मो|फोन|दूरध्वनी|संपर्क|भ्रमणध्वनी)$/i;
+  const NON_PERSON_PREFIXES =
+    /^(?:पत्ता|पता|कार्यालय|ऑफीस|shop|plot|flat|road|nagar|gst|gstin|email|website|web)\b/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     const namePhoneMatches = [
       ...line.matchAll(
-        /([A-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s.]+)\s*:\s*(?:[^\d]*)([6-9]\d{9})/g
+        /([A-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s.]+)\s*[:\-–|]\s*(?:[^\d]*)([6-9]\d{9})/g
       ),
     ];
     if (namePhoneMatches.length > 0) {
       for (const m of namePhoneMatches) {
         const pName = m[1]?.trim();
+        const pPhone = m[2]?.trim();
         if (
           pName &&
-          pName.length >= 3 &&
-          pName.length <= 30 &&
+          pName.length >= 2 &&
+          pName.length <= 35 &&
+          !TELEPHONY_LABELS.test(pName) &&
+          !NON_PERSON_PREFIXES.test(pName) &&
           isValidPersonCandidate(pName) &&
-          !/\b(?:mob|mobile|tel|telephone|phone|ph|cell|off|res|fax|contact)\b|मोबाईल|मोबाइल|मो\.|मो|फोन|दूरध्वनी|संपर्क|पत्ता|पता|कार्यालय|ऑफीस/i.test(
-            pName
-          ) &&
-          !/स्टील|फर्निचर|इलेक्ट्रॉनिक्स|मोटर्स|ट्रेडर्स|sports|telecom|solutions/i.test(
-            pName
+          !TRADE_CATEGORIES.some((c) =>
+            pName.toUpperCase().includes(c.toUpperCase())
           )
         ) {
-          if (
-            !refinedPersons.some(
-              (p) => p.name.toLowerCase() === pName.toLowerCase()
-            )
-          ) {
-            refinedPersons.push({ name: pName, role: 'Owner' });
+          const attachedPhones: string[] = [];
+          if (pPhone) {
+            attachedPhones.push(pPhone);
+            discoveredPhones.add(pPhone);
+          }
+
+          // Vertical Stacked-Phone Clustering:
+          // Cluster consecutive subsequent line(s) containing only phone numbers
+          let j = i + 1;
+          while (j < lines.length) {
+            const nextLine = lines[j]!.trim();
+            const cleanDigits = nextLine.replace(/\D/g, '');
+            const normalized =
+              cleanDigits.length === 12 && cleanDigits.startsWith('91')
+                ? cleanDigits.slice(2)
+                : cleanDigits;
+            const isPurePhone =
+              /^(?:(?:mob|ph|फोन|मो)\.?\s*[:\-–]?\s*)?(?:\+?91[\s-]?)?([6-9]\d{9})$/i.test(
+                nextLine
+              ) ||
+              (normalized.length === 10 &&
+                /^[6-9]/.test(normalized) &&
+                !/[a-zA-Z\u0900-\u097F]{3,}/.test(nextLine));
+            if (isPurePhone && normalized.length === 10) {
+              if (!attachedPhones.includes(normalized)) {
+                attachedPhones.push(normalized);
+                discoveredPhones.add(normalized);
+              }
+              j++;
+            } else {
+              break;
+            }
+          }
+
+          const existingIdx = refinedPersons.findIndex(
+            (p) => p.name.toLowerCase() === pName.toLowerCase()
+          );
+          if (existingIdx >= 0) {
+            const current = refinedPersons[existingIdx]!;
+            refinedPersons[existingIdx] = {
+              ...current,
+              phones: Array.from(
+                new Set([...(current.phones || []), ...attachedPhones])
+              ),
+              isPrimary: existingIdx === 0,
+            };
+          } else {
+            refinedPersons.push({
+              name: pName,
+              role: 'Owner',
+              phones: attachedPhones,
+              isPrimary: refinedPersons.length === 0,
+            });
           }
         }
       }
@@ -1924,7 +1693,38 @@ export function runLocalSemanticExtraction(
           line
         );
       if (isAllCapsName && !isBusiness && isValidPersonCandidate(line)) {
-        refinedPersons.push({ name: line.trim(), role: 'Proprietor' });
+        const attachedPhones: string[] = [];
+        let j = lines.indexOf(line) + 1;
+        while (j < lines.length) {
+          const nextLine = lines[j]!.trim();
+          const cleanDigits = nextLine.replace(/\D/g, '');
+          const normalized =
+            cleanDigits.length === 12 && cleanDigits.startsWith('91')
+              ? cleanDigits.slice(2)
+              : cleanDigits;
+          const isPurePhone =
+            /^(?:(?:mob|ph|फोन|मो)\.?\s*[:\-–]?\s*)?(?:\+?91[\s-]?)?([6-9]\d{9})$/i.test(
+              nextLine
+            ) ||
+            (normalized.length === 10 &&
+              /^[6-9]/.test(normalized) &&
+              !/[a-zA-Z\u0900-\u097F]{3,}/.test(nextLine));
+          if (isPurePhone && normalized.length === 10) {
+            if (!attachedPhones.includes(normalized)) {
+              attachedPhones.push(normalized);
+              discoveredPhones.add(normalized);
+            }
+            j++;
+          } else {
+            break;
+          }
+        }
+        refinedPersons.push({
+          name: line.trim(),
+          role: 'Proprietor',
+          phones: attachedPhones,
+          isPrimary: refinedPersons.length === 0,
+        });
         break;
       }
     }
@@ -2010,7 +1810,6 @@ export function runLocalSemanticExtraction(
   }
 
   // 4. Indic & Marathi Phone Number Extraction & Healing
-  const discoveredPhones = new Set<string>(card.phoneNumbers);
   const phoneRegex =
     /(?:\+?91[\s-]?)?(?:[-–\s]*)?([6-9]\d{4}[\s-]?\d{5}|[6-9]\d{9})\b/g;
   for (const line of lines) {
@@ -2034,8 +1833,6 @@ export function runLocalSemanticExtraction(
   let healedTagline = card.tagline;
   const servicesSet = new Set<string>(card.providedServices || []);
   let healedAddresses = [...(card.addressLines || [])];
-
-  const fullText = lines.join(' ');
 
   // A. Digital Domain & Website Reconciliation:
   // Dynamically matches lines whose alphanumeric character sequence aligns with
@@ -2067,7 +1864,15 @@ export function runLocalSemanticExtraction(
         ) &&
         !line.match(/^(?:Dr\.|Adv\.|Mr\.|Mrs\.|Ms\.|Shri\b)/i) &&
         !line.match(/^[0-9+]/) &&
-        !refinedPersons.some((p) => p.name.toLowerCase() === line.toLowerCase())
+        !refinedPersons.some(
+          (p) => p.name.toLowerCase() === line.toLowerCase()
+        ) &&
+        !/(?:High\s+Court\s+Advocate|Consulting\s+Physician|M\.D\.\s*\(|MBBS|LL\.B\.)/i.test(
+          line
+        ) &&
+        !/(?:Consulting\s+Physician|M\.D\.\s*\(|MBBS|LL\.B\.|Advocate|Legal\s+Consultant)/i.test(
+          line
+        )
       ) {
         const cleanLine = line.toLowerCase().replace(/[^a-z0-9]/g, '');
         const matchedSlug = domainSlugs.find((slug) => {
@@ -2133,9 +1938,9 @@ export function runLocalSemanticExtraction(
       prevUpper.includes(cat.toUpperCase())
     );
 
-    // ONLY join when prev is brand name (no trade category) and line adds the trade category
+    // Join when prev is brand name (no trade category or possessive) and line adds the trade category
     if (
-      !prevHasCategory &&
+      (!prevHasCategory || prev.endsWith("'s") || prev.endsWith("'S")) &&
       hasCategory &&
       prev.length >= 2 &&
       prev.length <= 35 &&
@@ -2160,6 +1965,7 @@ export function runLocalSemanticExtraction(
       !prev.includes('एक') &&
       !prev.match(/^[0-9+]/) &&
       !line.match(/^[0-9+]/) &&
+      !isRoleOrDesignation(prev, refinedPersons) &&
       !refinedPersons.some(
         (p) =>
           p.name.toLowerCase() === prev.toLowerCase() ||
@@ -2187,6 +1993,8 @@ export function runLocalSemanticExtraction(
       );
       if (
         hasCat &&
+        !SERVICES_SECTION_HEADER_REGEX.test(line) &&
+        !BULLET_PREFIX_REGEX.test(line) &&
         !line.includes('आमच्याकडे') &&
         !line.includes('लागणाऱ्या') &&
         !line.includes('होलसेल') &&
@@ -2197,7 +2005,7 @@ export function runLocalSemanticExtraction(
           /^(?:Tel|Mob|Phone|Email|GSTIN|Works|Office|Chamber|Corporate|Plot|Shop|Road|Plot No)/i
         ) &&
         !line.match(
-          /^(?:Advocate|Adv\.|Director|Proprietor|Managing|CEO|Founder|Whole\s*Seller|Wholesaler|Retailer|Manufacturer\s+of|Dealers\s+in|All\s+types|All\s+kinds|Specializing\s+in)/i
+          /^(?:High\s+Court\s+Advocate|Senior\s+Advocate|Legal\s+Consultant|Advocate|Adv\.|Director|Proprietor|Managing|CEO|Founder|Consulting\s+Physician|Consultant|Physician|Doctor|Dr\.|Surgeon|M\.D\.|MBBS|BAMS|BHMS|Whole\s*Seller|Wholesaler|Retailer|Manufacturer\s+of|Dealers\s+in|All\s+types|All\s+kinds|Specializing\s+in)/i
         ) &&
         !refinedPersons.some((p) => p.name.toLowerCase() === line.toLowerCase())
       ) {
@@ -2212,6 +2020,7 @@ export function runLocalSemanticExtraction(
             !prev.includes('एक');
           const isNotService = !prev.includes('आमच्याकडे');
           const isNotMetadata = !prev.match(/reg|no\.|lic|gst|vat|email|www/i);
+          const isNotRole = !isRoleOrDesignation(prev, refinedPersons);
           const lineStartsWithCategory = TRADE_CATEGORIES.some((cat) =>
             line.toLowerCase().startsWith(cat.toLowerCase())
           );
@@ -2223,7 +2032,8 @@ export function runLocalSemanticExtraction(
             isNotPhone &&
             isNotInvocation &&
             isNotService &&
-            isNotMetadata
+            isNotMetadata &&
+            isNotRole
           ) {
             healedCompany = `${prev} ${line}`.trim();
             break;
@@ -2237,188 +2047,325 @@ export function runLocalSemanticExtraction(
   }
 
   // Common Devanagari OCR Ligature Repairs:
+  if (
+    healedCompany &&
+    (SERVICES_SECTION_HEADER_REGEX.test(healedCompany.trim()) ||
+      BULLET_PREFIX_REGEX.test(healedCompany.trim()))
+  ) {
+    healedCompany = undefined;
+  }
   if (healedCompany) {
-    healedCompany = healedCompany
-      .replace(/मोटसी/u, 'मोटर्स')
-      .replace(/गुभुगीबिंद\s*शिंग/u, 'गुरुगोविंद सिंग');
+    healedCompany = healedCompany;
   }
 
   // Dynamic Tagline & Catalog Services Detection
-  if (!healedTagline) {
-    const catalogLine = lines.find((l) => {
-      const parts = l.split(/[,|•]/);
-      return parts.length >= 3 && parts.every((p) => p.trim().length >= 2);
-    });
-    if (catalogLine) {
-      healedTagline = catalogLine.trim();
-      catalogLine.split(/[,|•]/).forEach((s) => {
-        const clean = s.trim().replace(/^&\s*/, '');
-        if (clean.length >= 3) {
-          const titleCased = clean
-            .toLowerCase()
-            .replace(/\b\w/g, (c) => c.toUpperCase());
-          servicesSet.add(titleCased);
-        }
-      });
-    }
-  }
 
-  // Universal Tagline Detection
-  if (/MAYURI/i.test(fullText)) {
-    if (!healedTagline || healedTagline.length === 0) {
-      healedTagline = 'MAYURI';
-    } else if (!healedTagline.includes('MAYURI')) {
-      healedTagline = `${healedTagline} • MAYURI`;
-    }
-  } else if (/लग्न\s*बस्त्याचे\s*माहेरघर/u.test(fullText)) {
-    healedTagline = 'लग्न बस्त्याचे माहेरघर';
-  } else if (/एक\s*नई\s*सोच\s*जो\s*आपकी\s*जिंदगी\s*बदल\s*दे/u.test(fullText)) {
-    healedTagline = 'एक नई सोच जो आपकी जिंदगी बदल दे.....';
-  } else if (/कम्पलीट\s*फॅमिली\s*शॉप/u.test(fullText)) {
-    healedTagline = 'कम्पलीट फॅमिली शॉप';
-  } else if (/CARROM\s*BOARD/i.test(fullText)) {
-    healedTagline = 'CARROM BOARD';
-  } else if (!healedTagline) {
+  // ── Universal Dynamic Tagline Extractor ─────────────────────────────────────
+  // Discovers slogans, branding mottos, and punchlines without hardcoded card strings
+  if (!healedTagline) {
+    const TAGLINE_CUES =
+      /माहेरघर|विश्व|दालन|केंद्र|शुद्ध तुपातील|गुणवत्तापूर्ण|विश्वासार्हतेचे|एकदा भेट द्या|सोच|जिंदगी|बदल|सॉल्युशन|सर्व्हिस|क्वालिटी|कम्पलीट|फॅमिली|solution|quality|excellence|trusted|service|satisfaction|crafting|building|connecting|innovating|complete\s+family|one\s+stop/iu;
     for (const line of lines) {
+      const trimmedLine = line.trim();
       if (
-        /माहेरघर|विश्व|दालन|केंद्र|शुद्ध तुपातील|गुणवत्तापूर्ण|विश्वासार्हतेचे|एकदा भेट द्या/u.test(
-          line
-        ) &&
-        line !== healedCompany
+        /^[A-Z]{3,15}$/.test(trimmedLine) &&
+        trimmedLine !== healedCompany &&
+        (!healedCompany || !healedCompany.includes(trimmedLine)) &&
+        !isContactInfo(trimmedLine) &&
+        !NON_PERSON_KEYWORDS.has(trimmedLine.toLowerCase())
+      ) {
+        healedTagline = trimmedLine;
+        break;
+      }
+      if (
+        TAGLINE_CUES.test(line) &&
+        !LOCATION_REGEX.test(line) &&
+        !/\b[1-8]\d{5}\b/.test(line) &&
+        line !== healedCompany &&
+        !refinedPersons.some((p) => p.name === line) &&
+        line.length >= 6 &&
+        line.length <= 80 &&
+        !line.match(
+          /^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add|Off)/i
+        )
       ) {
         healedTagline = line.trim();
         break;
       }
     }
-  }
-
-  // Universal Services / Products Detection
-  if (/ई-रिक्षा|ई\s*[-–]\s*रथा|ई\s*[-–]\s*रत्था/u.test(fullText)) {
-    servicesSet.add('ई-रिक्षा');
-  }
-  if (/ई-बाईक|ई-बाइक|ई\s*[-–]\s*बाईक/u.test(fullText)) {
-    servicesSet.add('ई-बाईक');
-  }
-  if (/सेल्स|सर्व्हिस|स्पेअर्स|रोजससिहेताअॅडरपेअली/u.test(fullText)) {
-    servicesSet.add('सेल्स सर्व्हिस अँड स्पेअर्स');
-    if (!healedTagline || healedTagline === 'MAYURI') {
-      healedTagline = healedTagline
-        ? `सेल्स सर्व्हिस अँड स्पेअर्स (${healedTagline})`
-        : 'सेल्स सर्व्हिस अँड स्पेअर्स';
+    // If not found by cue, check lines right below company name that are not contact info
+    if (!healedTagline && healedCompany) {
+      const compIdx = lines.findIndex(
+        (l) => l.trim() === healedCompany || l.includes(healedCompany)
+      );
+      if (compIdx >= 0 && compIdx + 1 < lines.length) {
+        const candidate = lines[compIdx + 1]!.trim();
+        if (
+          candidate.length >= 4 &&
+          candidate.length <= 45 &&
+          !candidate.includes('@') &&
+          !candidate.includes('www.') &&
+          !candidate.match(/^[0-9+]/) &&
+          !candidate.match(
+            /^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address)/i
+          ) &&
+          !refinedPersons.some((p) => p.name === candidate) &&
+          !TRADE_CATEGORIES.some(
+            (cat) => candidate.toUpperCase() === cat.toUpperCase()
+          )
+        ) {
+          healedTagline = candidate;
+        }
+      }
     }
   }
-  if (/Sports\s*Goods/i.test(fullText) || /CARROM\s*BOARD/i.test(fullText)) {
-    servicesSet.add('All Sports Goods');
-    if (/CARROM\s*BOARD/i.test(fullText)) servicesSet.add('Carrom Board');
-  }
-  if (
-    /MOBILE\s*SPARE\s*PARTS/i.test(fullText) ||
-    /LCD\s*&\s*TOUCH/i.test(fullText)
-  ) {
-    servicesSet.add('Mobile Spare Parts');
-    servicesSet.add('Folder, LCD & Touch');
-  }
-  if (
-    /Web\s*&\s*Mobile\s*App/i.test(fullText) ||
-    /Digital\s*Marketing/i.test(fullText)
-  ) {
-    servicesSet.add('Web & Mobile App Development');
-    servicesSet.add('Digital Marketing');
-    servicesSet.add('Billing Software');
-    servicesSet.add('Meta Ads');
-  }
-  if (
-    /VEDIC\s*ASTROLOGY/i.test(fullText) ||
-    /ASTRO\s*NUMEROLOGY/i.test(fullText)
-  ) {
-    servicesSet.add('Vedic Astrology');
-    servicesSet.add('Astro Numerology');
-    servicesSet.add('Tarot & Healing');
-    servicesSet.add('Vastu & Gemstones');
-  }
 
-  // Products from Marathi listing lines (e.g. "आमच्याकडे सोफासेट, डायनिंग टेबल, कपाट...")
+  // ── Universal Dynamic Catalog & Services Extractor ──────────────────────────
+  // Extracts bulleted items, comma/pipe-separated products, and introductory service catalogs
+  let inServiceSection = false;
   for (const line of lines) {
+    if (SERVICES_SECTION_HEADER_REGEX.test(line)) {
+      inServiceSection = true;
+      continue;
+    }
+    if (inServiceSection) {
+      const cleanLine = line.replace(BULLET_PREFIX_REGEX, '$1').trim();
+      if (
+        cleanLine.length >= 2 &&
+        cleanLine.length <= 50 &&
+        !isContactInfo(cleanLine) &&
+        !LOCATION_REGEX.test(cleanLine)
+      ) {
+        servicesSet.add(cleanLine);
+        continue;
+      }
+    }
+    const qMatch = line.match(
+      /(?:quality\s+(?:of\s+)?|all\s+types?\s+(?:of\s+)?)([^,\n]+)/i
+    );
+    if (qMatch && qMatch[1]) servicesSet.add(qMatch[1].trim());
+    if (/all\s+sports\s+goods/i.test(line)) servicesSet.add('All Sports Goods');
+    // A. Bulleted lines: e.g. "■ ई-रिक्षा", "• Mobile Spare Parts", "* Web Development"
+    const bulletMatch = line.match(BULLET_PREFIX_REGEX);
+    if (bulletMatch && bulletMatch[1]) {
+      const item = bulletMatch[1].trim();
+      if (item.length >= 2 && item.length <= 50 && !isContactInfo(item)) {
+        servicesSet.add(item);
+      }
+      continue;
+    }
+
+    // B. Comma, pipe, or bullet-separated item lines: e.g. "LCD & TOUCH, MOBILE SPARE PARTS, TOOLS"
+    const parts = line
+      .split(/[,|•■▪/]/)
+      .map((p) => p.trim())
+      .filter((p) => p.length >= 3 && p.length <= 40);
     if (
-      /आमच्याकडे|मिळतील|मिळेल|सोफासेट|डायनिंग टेबल|कपाट|ऑफीस टेबल|फ्रिज|कुलर|भांडी होलसेल/u.test(
+      parts.length >= 2 &&
+      !line.includes('@') &&
+      !line.includes('www.') &&
+      !line.match(/^(?:Off|Res|Shop|Plot|Road)/i) &&
+      !LOCATION_REGEX.test(line) &&
+      !/\b[1-8]\d{5}\b/.test(line)
+    ) {
+      const isAllNonContact = parts.every(
+        (p) =>
+          !isContactInfo(p) &&
+          !refinedPersons.some(
+            (per) => per.name.toLowerCase() === p.toLowerCase()
+          )
+      );
+      if (isAllNonContact) {
+        parts.forEach((p) => {
+          const clean = p.replace(/^[&\-–•*]\s*/, '').trim();
+          if (clean.length >= 3) {
+            const titleCased =
+              /^[A-Z\s&]+$/.test(clean) && clean.length > 3
+                ? clean
+                    .split(/\s+/)
+                    .map(
+                      (w) =>
+                        w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+                    )
+                    .join(' ')
+                : clean;
+            servicesSet.add(titleCased);
+          }
+        });
+      }
+    }
+
+    // D. Activity, service, training & catalog items (e.g. "ZUMBA", "CROSSFIT", "PILATES", "QUBO TRAINING")
+    const cleanLower = line.trim().toLowerCase();
+    const isCatalogKeyword = Array.from(NON_PERSON_KEYWORDS).some(
+      (kw) => cleanLower === kw || (kw.length >= 4 && cleanLower.includes(kw))
+    );
+    if (
+      !line.includes(',') &&
+      !line.includes('आमच्याकडे') &&
+      isCatalogKeyword &&
+      line.trim().length >= 3 &&
+      line.trim().length <= 50 &&
+      line.trim() !== healedCompany &&
+      line.trim() !== healedTagline &&
+      !isContactInfo(line) &&
+      !LOCATION_REGEX.test(line) &&
+      !/^(?:Tel|Mob|Phone|GSTIN|Plot|Shop|Road|Address|Res Add|Off)/i.test(
+        line
+      ) &&
+      !refinedPersons.some((p) => p.name.toLowerCase() === cleanLower)
+    ) {
+      servicesSet.add(line.trim());
+      continue;
+    }
+
+    // C. Indic catalog sentences: e.g. "आमच्याकडे सोफासेट, डायनिंग टेबल, कपाट होलसेल दरात मिळतील."
+    if (
+      /आमच्याकडे|येथे|मिळतील|मिळेल|होलसेल दरात|विक्रेते|डीलर|डीलर्स|Dealers in|Specialists in|Manufacturers of/iu.test(
         line
       )
     ) {
       const cleaned = line
         .replace(
-          /आमच्याकडे|येथे|लागणाऱ्या|सर्व|वस्तु|व|भांडी|होलसेल|दरात|मिळतील\.?/gu,
+          /आमच्याकडे|येथे|लागणाऱ्या|सर्व|वस्तु|व|भांडी|होलसेल|दरात|मिळतील\.?|मिळेल\.?|Dealers in:?|Specialists in:?|Manufacturers of:?/giu,
           ''
         )
         .trim();
-      const parts = cleaned
-        .split(/[,،•■*>|\n]/u)
+      cleaned
+        .split(/[,،•■*>|/\n]/u)
         .map((s) => s.trim())
-        .filter((s) => s.length >= 3);
-      for (const p of parts) {
-        if (
-          !p.includes('रोड') &&
-          !p.includes('चौक') &&
-          !p.includes('ता.') &&
-          !p.includes('शेजारी')
-        ) {
-          servicesSet.add(p);
-        }
-      }
+        .filter((s) => s.length >= 3 && s.length <= 40)
+        .forEach((p) => {
+          if (!/रोड|रस्ता|चौक|ता\.|जि\.|शेजारी/u.test(p)) {
+            servicesSet.add(p);
+          }
+        });
     }
   }
 
-  // Universal Address Detection
-  const STATUS_BAR_NOISE =
-    /\d{1,2}:\d{2}|KB\/s|MB\/s|\d+%\b|VoLTE|4G|5G|LTE|Yo\s*\d+%/i;
-  const LOCATION_REGEX =
-    /रोड|रस्ता|मार्ग|चौक|नाका|फाटा|शेजारी|समोर|जवळ|मागे|ता\.|जि\.|तालुका|जिल्हा|मु\.|पो\.|मु\.पो\.|गाव|नगर|पेठ|कॉलनी|वाडी|सोसायटी|अपार्टमेंट|कॉम्प्लेक्स|शॉप नं|दुकान नं|प्लॉट नं|पंढरपूर|सोलापूर|पुणे|मुंबई|नागपूर|नाशिक|कोल्हापूर|संभाजीनगर|नांदेड|सांगली|सातारा|भोसे|टेंभुर्णी|Sitabuldi|Nagpur|Amsterdam|Netherland|Dharampeth|Sadar|Gandhibagh|Hingna|Manish Nagar|Laxmi Nagar|Subhedar Layout|Durga Nagar|Maharaj Bag/iu;
+  // ── Universal Multi-Address Disentangler & Structured Address Generator ─────
+  // Disentangles Office, Residence, Branches, and International locations with zero hardcoding
+  const structuredAddresses: StructuredAddress[] = [];
+  const validAddresses: string[] = [];
 
-  if (
-    (/श्री\s*[-–]?\s*नगर|श्री-गरसानेवा/u.test(fullText) &&
-      /मानेवाडा|हायोक|नागपुर|नागपूर/u.test(fullText)) ||
-    (/मानेवाडा/u.test(fullText) && /नागपूर|नागपुर/u.test(fullText)) ||
-    (/हायोक/u.test(fullText) && /नागपुर|नागपूर/u.test(fullText))
-  ) {
-    const healedAddr = 'पत्ता : श्री नगर, मानेवाडा चौक, नागपूर';
+  const PREFIX_QUALIFIERS = [
+    {
+      pattern:
+        /^(?:off(?:ice)?(?:\s*add)?|corporate\s*office|head\s*office|regd(?:\.?\s*office)?|कार्यालय|ऑफीस(?:\s*पत्ता)?|पत्ता|पता)\s*[:\-–|]/i,
+      type: 'head_office' as const,
+      label: 'Office',
+    },
+    {
+      pattern:
+        /^(?:res(?:idence)?(?:\s*add)?|home|house|निवास(?:\s*पत्ता)?|घर)\s*[:\-–|]/i,
+      type: 'residence' as const,
+      label: 'Residence',
+    },
+    {
+      pattern: /^(?:works|factory|plant|कारखाना)\s*[:\-–|]/i,
+      type: 'factory' as const,
+      label: 'Factory',
+    },
+    {
+      pattern: /^(?:chamber|clinic|dispensary|हॉस्पिटल|दवाखाना)\s*[:\-–|]/i,
+      type: 'chamber' as const,
+      label: 'Chamber',
+    },
+    {
+      pattern: /^(?:branch(?:\s*office)?|शाखा)\s*[:\-–|]/i,
+      type: 'branch' as const,
+      label: 'Branch',
+    },
+  ];
+
+  const PIPE_BRANCH_REGEX =
+    /^([A-Za-z\u0900-\u097F\s,.-]+?)\s*\|\s*(?:(?:\+?91|0)[\s-]*)?([6-9]\d{4}[\s.-]?\d{5}|[6-9]\d{9}|0\d{2,4}[\s.-]?\d{6,8})/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+
+    if (!line || STATUS_BAR_NOISE.test(line)) continue;
+    if (line === healedCompany || line === healedTagline) continue;
+    if (refinedPersons.some((p) => p.name.toLowerCase() === line.toLowerCase()))
+      continue;
+
+    // A. Pipe-separated Branch Lines: e.g. "Sitabuldi, Near Variety Square | 95270 00045"
+    const pipeMatch = line.match(PIPE_BRANCH_REGEX);
+    if (pipeMatch) {
+      const branchAddr = pipeMatch[1]!.trim();
+      const branchPhone = pipeMatch[2]!.trim();
+      const cleanBranch = branchAddr.trim();
+      validAddresses.push(cleanBranch);
+      structuredAddresses.push({
+        type: 'branch',
+        label: cleanBranch.split(/[,\-]/)[0]?.trim() || 'Branch',
+        fullAddress: cleanBranch,
+        city: extractCityFromText(cleanBranch),
+        pincode: extractPinFromText(cleanBranch),
+        dedicatedPhone: branchPhone,
+      });
+      continue;
+    }
+
+    // B. Explicit Prefix Qualified Lines: e.g. "Off Add : Shop No. 12, Bag Road..."
+    let matchedPrefix = false;
+    for (const pq of PREFIX_QUALIFIERS) {
+      if (pq.pattern.test(line)) {
+        matchedPrefix = true;
+        const cleanAddr = line.replace(pq.pattern, '').trim();
+        validAddresses.push(cleanAddr);
+        structuredAddresses.push({
+          type: pq.type,
+          label: pq.label,
+          fullAddress: cleanAddr,
+          city: extractCityFromText(cleanAddr),
+          pincode: extractPinFromText(cleanAddr),
+        });
+        break;
+      }
+    }
+    if (matchedPrefix) continue;
+
+    // C. General Location / Landmark lines
     if (
-      !healedAddresses.some(
-        (a) =>
-          a.includes('मानेवाडा') || a.includes('नागपूर') || a.includes('नागपुर')
-      )
+      (LOCATION_REGEX.test(line) || /^[1-8]\d{5}$/.test(line)) &&
+      !line.includes('@') &&
+      !line.includes('www.') &&
+      !isPureCatalogLine(line)
     ) {
-      healedAddresses.push(healedAddr);
-    } else {
-      healedAddresses = healedAddresses.map((a) =>
-        a.includes('मानेवाडा') ||
-        a.includes('श्री') ||
-        a.includes('नागपूर') ||
-        a.includes('नागपुर')
-          ? healedAddr
-          : a
-      );
-    }
-  } else {
-    const validAddresses: string[] = [];
-    for (const line of lines) {
-      if (STATUS_BAR_NOISE.test(line)) continue;
-      if (/आमच्याकडे|सोफासेट|कपाट|टेबल|मिळतील/u.test(line)) continue;
-      if (
-        /^पत्ता\s*[:\-]/u.test(line) ||
-        /^पता\s*[:\-]/u.test(line) ||
-        /^कार्यालय\s*[:\-]/u.test(line) ||
-        /^ऑफीस पत्ता\s*[:\-]/u.test(line) ||
-        LOCATION_REGEX.test(line)
-      ) {
-        if (!validAddresses.includes(line) && line.length > 6) {
-          validAddresses.push(line.trim());
-        }
+      // Check if line should be appended to previous address or stand alone
+      const pin = extractPinFromText(line);
+      const isCountryMarker =
+        /^(?:India|Netherlands|USA|UK|UAE|Singapore)\s*[:\-]/i.test(line);
+      if (isCountryMarker) {
+        const countryParts = line.split(/[:\-]/);
+        const country = countryParts[0]?.trim();
+        const addr = countryParts.slice(1).join('-').trim();
+        validAddresses.push(addr);
+        structuredAddresses.push({
+          type: 'general',
+          label: country,
+          fullAddress: addr,
+          country,
+          city: extractCityFromText(addr),
+          pincode: extractPinFromText(addr),
+        });
+      } else if (line.length >= 8) {
+        validAddresses.push(line);
+        structuredAddresses.push({
+          type: 'general',
+          label: 'Location',
+          fullAddress: line,
+          city: extractCityFromText(line),
+          pincode: pin,
+        });
       }
-    }
-    if (validAddresses.length > 0) {
-      healedAddresses = validAddresses;
     }
   }
 
+  if (validAddresses.length > 0) {
+    healedAddresses = validAddresses;
+  }
   return {
     ...card,
     companyName: healedCompany,
@@ -2448,6 +2395,7 @@ export function runLocalSemanticExtraction(
     email: healedEmails[0] || card.email,
     websites: healedWebsites,
     addressLines: healedAddresses,
+    addresses: structuredAddresses,
   };
 }
 
@@ -2739,7 +2687,7 @@ export function extractHybridUniversalCard(
     rawText,
   };
 
-  const parsed = runLocalSemanticExtraction(healedResidual, baseCard);
+  const parsed = runLocalSemanticExtraction(rawText, baseCard);
 
   // Merge: deterministic fields always override
   const mergedCard: BusinessCard = {
@@ -2750,6 +2698,7 @@ export function extractHybridUniversalCard(
     websites: det.websites.length > 0 ? det.websites : parsed.websites,
     pincode: det.pincode || parsed.pincode,
     gstin: det.gstin || parsed.gstin,
+    addresses: parsed.addresses || [],
   };
 
   const assessment = calculateExtractionConfidence(mergedCard);

@@ -5,7 +5,17 @@
  * `existin_app_mehtods.md` for seamless binding with the CardFlowAI mobile app.
  */
 import NativeCardLens from './NativeCardLens';
-import type { BusinessCard, DocumentScannerOptions, ScanResult } from './types';
+import type {
+  BusinessCard,
+  DocumentScannerOptions,
+  ScanResult,
+  StructuredAddress,
+} from './types';
+import {
+  isValidPersonCandidate,
+  BULLET_PREFIX_REGEX,
+  SERVICES_SECTION_HEADER_REGEX,
+} from './LocalCardLLM';
 
 // ─── CardFlowAI Response Data Contracts ──────────────────────────────────────
 
@@ -36,6 +46,7 @@ export interface CardFlowCardData {
   state: string;
   providedServices: string[];
   contacts: CardFlowContact[];
+  addresses?: StructuredAddress[];
   meta: Record<string, any>;
 }
 
@@ -254,17 +265,28 @@ function extractCityAndState(addressLines: string[]): {
     }
   }
 
-  // Fallback: try comma split from end if pincode line
+  // Precision fallback: ONLY match city if preceding a 6-digit PIN or following district/taluka anchor
   if (!detectedCity && addressLines.length > 0) {
-    const lastLine = addressLines[addressLines.length - 1] || '';
-    const parts = lastLine
-      .split(/[,-]/)
-      .map((p) => p.trim())
-      .filter(Boolean);
-    for (const part of parts) {
-      if (!/^\d+$/.test(part) && part.length > 2) {
-        const cleanPart = part.replace(/\bdethi\b/gi, 'Delhi');
-        if (!detectedCity) detectedCity = cleanPart;
+    for (const line of addressLines) {
+      const pinAnchor = line.match(
+        /\b([A-Za-z\u0900-\u097F]{3,25})\s*[-–,]?\s*(?:pin|pincode)?\s*[-–:]?\s*[1-8]\d{5}\b/i
+      );
+      if (pinAnchor) {
+        const cand = pinAnchor[1]!.trim();
+        if (
+          !/^(?:near|opp|behind|beside|road|street|nagar|flat|shop|plot|lane)/i.test(
+            cand
+          )
+        ) {
+          detectedCity = cand;
+          break;
+        }
+      }
+      const adminAnchor = line.match(
+        /(?:Dist(?:rict)?\.?|Tal(?:uka)?\.?|City\s*[:\-])\s*([A-Za-z\u0900-\u097F]{3,25})\b/i
+      );
+      if (adminAnchor) {
+        detectedCity = adminAnchor[1]!.trim();
         break;
       }
     }
@@ -310,10 +332,45 @@ export function toCardFlowApiResponse(
   const threshold = options.confidenceThreshold ?? 0.7;
   const jobId = options.jobId || generateUuid();
 
-  const primaryPerson = card.contactPersons?.[0];
+  const rawContactPersons = card.contactPersons || [];
+  const validContactPersons: typeof rawContactPersons = [];
+  const redirectedServices: string[] = [];
+
+  for (const person of rawContactPersons) {
+    if (isValidPersonCandidate(person.name)) {
+      validContactPersons.push(person);
+    } else {
+      const clean = person.name.replace(BULLET_PREFIX_REGEX, '$1').trim();
+      if (clean.length >= 2 && !SERVICES_SECTION_HEADER_REGEX.test(clean)) {
+        redirectedServices.push(clean);
+      }
+    }
+  }
+
+  const primaryPerson = validContactPersons[0];
   const fullName = primaryPerson?.name || '';
   const jobTitle = primaryPerson?.role || '';
   const companyName = card.companyName || '';
+  // Disambiguate fullName and companyName if identical, and reject service headers
+  let safeFullName = fullName;
+  let safeCompanyName = SERVICES_SECTION_HEADER_REGEX.test(companyName.trim())
+    ? ''
+    : companyName;
+  if (
+    safeFullName &&
+    safeCompanyName &&
+    safeFullName.toLowerCase() === safeCompanyName.toLowerCase()
+  ) {
+    if (safeFullName.match(/^(?:Dr\.|Adv\.|Mr\.|Mrs\.|Ms\.|Shri\b)/i)) {
+      safeCompanyName = '';
+    } else if (
+      safeCompanyName.match(
+        /pvt|ltd|limited|llp|traders|motors|enterprises|hospital|clinic/i
+      )
+    ) {
+      safeFullName = '';
+    }
+  }
   const email = card.emails?.[0] || card.email || '';
   const phonePrimary = card.phoneNumbers?.[0] || '';
   const phoneSecondary = card.phoneNumbers?.[1] || null;
@@ -323,12 +380,18 @@ export function toCardFlowApiResponse(
   );
 
   const tagline = card.tagline || card.slogan || '';
-  const providedServices: string[] =
-    Array.isArray(card.providedServices) && card.providedServices.length > 0
-      ? card.providedServices
-      : tagline
+  const rawServices = Array.isArray(card.providedServices)
+    ? card.providedServices
+    : [];
+  const providedServices: string[] = Array.from(
+    new Set([
+      ...rawServices,
+      ...redirectedServices,
+      ...(rawServices.length === 0 && redirectedServices.length === 0 && tagline
         ? [tagline]
-        : [];
+        : []),
+    ])
+  );
   const category =
     options.categoryDefault ||
     (companyName.toLowerCase().includes('switchgear') ||
@@ -337,29 +400,37 @@ export function toCardFlowApiResponse(
       ? 'Switchgears & Electricals'
       : providedServices[0] || 'General Business');
 
-  // Build structured contacts list
+  // Build structured contacts list with real attached phones per contact
   const contacts: CardFlowContact[] =
-    card.contactPersons && card.contactPersons.length > 0
-      ? card.contactPersons.map((p, idx) => {
+    validContactPersons && validContactPersons.length > 0
+      ? validContactPersons.map((p, idx) => {
           const contactPhones: CardFlowContactPhone[] = [];
-          if (idx === 0 && phonePrimary) {
+          if (p.phones && p.phones.length > 0) {
+            p.phones.forEach((num, pIdx) => {
+              contactPhones.push({
+                type: pIdx === 0 ? 'primary' : 'secondary',
+                number: num,
+                numberType: 'mobile',
+              });
+            });
+          } else if (idx === 0 && phonePrimary) {
             contactPhones.push({
               type: 'primary',
               number: phonePrimary,
               numberType: 'mobile',
             });
-          }
-          if (idx === 0 && phoneSecondary) {
-            contactPhones.push({
-              type: 'secondary',
-              number: phoneSecondary,
-              numberType: 'work',
-            });
+            if (phoneSecondary) {
+              contactPhones.push({
+                type: 'secondary',
+                number: phoneSecondary,
+                numberType: 'work',
+              });
+            }
           }
           return {
             name: p.name,
             role: p.role || undefined,
-            email: idx === 0 && email ? email : undefined,
+            email: p.email || (idx === 0 && email ? email : undefined),
             phones: contactPhones,
           };
         })
@@ -444,9 +515,9 @@ export function toCardFlowApiResponse(
     result: {
       docType: 'business_card',
       data: {
-        fullName,
+        fullName: safeFullName,
         jobTitle,
-        companyName,
+        companyName: safeCompanyName,
         category,
         email,
         phonePrimary,
@@ -457,6 +528,7 @@ export function toCardFlowApiResponse(
         state,
         providedServices,
         contacts,
+        addresses: card.addresses || [],
         meta: {
           pincode: card.pincode,
           gstin: card.gstin,

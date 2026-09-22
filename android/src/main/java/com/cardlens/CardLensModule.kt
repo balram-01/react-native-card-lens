@@ -751,6 +751,71 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     })
   }
 
+  
+  /**
+   * Universal Multi-Page Business Card Asymmetric Disentangler:
+   * Merges multiple card pages by distinguishing primary contact pages (with phones/emails/director)
+   * from secondary marketing/offerings pages (tag clouds, word collages, services catalogs).
+   */
+  private fun mergeMultipleCardPages(cards: List<BusinessCard>): BusinessCard {
+    if (cards.size == 1) return cards.first()
+
+    val primaryCard = cards.maxByOrNull { card ->
+      (card.phoneNumbers.size * 10) +
+      (card.emails.size * 10) +
+      (card.addressLines.size * 5) +
+      (if (card.contactPersons.any { !it.role.isNullOrBlank() }) 20 else 0) +
+      (if (card.pincode != null) 5 else 0)
+    }
+
+    val validPersons = mutableListOf<ContactPerson>()
+    val redirectedServices = mutableListOf<String>()
+
+    for (card in cards) {
+      val isPrimary = (card == primaryCard)
+      val cardHasContacts = card.phoneNumbers.isNotEmpty() || card.emails.isNotEmpty()
+
+      for (p in card.contactPersons) {
+        val hasExplicitRole = !p.role.isNullOrBlank()
+        val hasSalutation = CardLayoutParser.matchSalutation(p.name) != null ||
+          p.name.matches(Regex("(?i)^(?:Dr\\.|Adv\\.|Mr\\.|Mrs\\.|Ms\\.|Shri\\b).*"))
+        val hasAttachedPhone = p.phones.isNotEmpty()
+        val isAnchored = hasExplicitRole || hasSalutation || hasAttachedPhone || (isPrimary && cardHasContacts) || (!isPrimary && cardHasContacts && card.contactPersons.size <= 2)
+
+        val nameLower = p.name.lowercase()
+        val isNonPersonKeyword = CardLayoutParser.NON_PERSON_KEYWORDS.any { nameLower.contains(it) }
+
+        if (isAnchored && !isNonPersonKeyword && CardLayoutParser.isValidPersonName(p.name, emptySet())) {
+          if (!validPersons.any { it.name.equals(p.name, ignoreCase = true) }) {
+            validPersons.add(p)
+          }
+        } else {
+          val cleanService = p.name.replace(CardLayoutParser.BULLET_PREFIX_REGEX, "").trim()
+          if (cleanService.length >= 2 && !CardLayoutParser.SERVICES_SECTION_HEADER_REGEX.matches(cleanService)) {
+            redirectedServices.add(cleanService)
+          }
+        }
+      }
+    }
+
+    return BusinessCard(
+      companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
+      tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
+      slogan = cards.firstOrNull { !it.slogan.isNullOrBlank() }?.slogan,
+      providedServices = (cards.flatMap { it.providedServices } + redirectedServices).distinct(),
+      contactPersons = validPersons,
+      phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
+      labeledPhones = cards.flatMap { it.labeledPhones }.distinctBy { it.number },
+      emails = cards.flatMap { it.emails }.distinct(),
+      websites = cards.flatMap { it.websites }.distinct(),
+      addressLines = cards.flatMap { it.addressLines }.distinct(),
+      pincode = cards.firstOrNull { !it.pincode.isNullOrBlank() }?.pincode,
+      gstin = cards.firstOrNull { !it.gstin.isNullOrBlank() }?.gstin,
+      qrCodeData = cards.firstOrNull { !it.qrCodeData.isNullOrBlank() }?.qrCodeData,
+      rawText = cards.mapIndexed { idx, c -> "--- Page ${idx + 1} ---\n${c.rawText}" }.joinToString("\n\n")
+    )
+  }
+
   override fun scanCardPages(imageUris: ReadableArray, promise: Promise) {
     val uris = toUriList(imageUris)
     if (uris.isEmpty()) {
@@ -763,22 +828,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
           val cards = pagesData.map { pageData ->
             CardScannerEngine.assembleBusinessCard(pageData.rawText, pageData.blocks, pageData.qrCodeData)
           }
-          val mergedCard = BusinessCard(
-            companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
-            tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
-            slogan = cards.firstOrNull { !it.slogan.isNullOrBlank() }?.slogan,
-            providedServices = cards.flatMap { it.providedServices }.distinct(),
-            contactPersons = cards.flatMap { it.contactPersons }.distinctBy { it.name.trim().lowercase() },
-            phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
-            labeledPhones = cards.flatMap { it.labeledPhones }.distinctBy { it.number },
-            emails = cards.flatMap { it.emails }.distinct(),
-            websites = cards.flatMap { it.websites }.distinct(),
-            addressLines = cards.flatMap { it.addressLines }.distinct(),
-            pincode = cards.firstOrNull { !it.pincode.isNullOrBlank() }?.pincode,
-            gstin = cards.firstOrNull { !it.gstin.isNullOrBlank() }?.gstin,
-            qrCodeData = cards.firstOrNull { !it.qrCodeData.isNullOrBlank() }?.qrCodeData,
-            rawText = cards.mapIndexed { idx, c -> "--- Page ${idx + 1} ---\n${c.rawText}" }.joinToString("\n\n")
-          )
+          val mergedCard = mergeMultipleCardPages(cards)
           promise.resolve(mergedCard.toWritableMap())
         } catch (e: Exception) {
           promise.reject("CARDLENS_CARD_PAGES_ERROR", e.message, e)
@@ -862,7 +912,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
             lineItems = bills.flatMap { it.lineItems },
             subtotal = bills.lastOrNull { it.subtotal != null }?.subtotal ?: bills.firstOrNull { it.subtotal != null }?.subtotal,
             amountDue = bills.lastOrNull { it.amountDue != null }?.amountDue ?: bills.firstOrNull { it.amountDue != null }?.amountDue,
-            rawText = bills.mapIndexed { idx, b -> "--- Page ${idx + 1} ---\n${b.rawText}" }.joinToString("\n\n")
+            rawText = if (bills.size == 1) bills.first().rawText else bills.mapIndexed { idx, b -> "--- Page ${idx + 1} ---\n${b.rawText}" }.joinToString("\n\n")
           )
           promise.resolve(mergedBill.toWritableMap())
         } catch (e: Exception) {
@@ -920,19 +970,7 @@ class CardLensModule(reactContext: ReactApplicationContext) :
             val cards = pagesData.map { pageData ->
               CardScannerEngine.assembleBusinessCard(pageData.rawText, pageData.blocks, pageData.qrCodeData)
             }
-            val mergedCard = BusinessCard(
-              companyName = cards.firstOrNull { !it.companyName.isNullOrBlank() }?.companyName,
-              tagline = cards.firstOrNull { !it.tagline.isNullOrBlank() }?.tagline,
-              contactPersons = cards.flatMap { it.contactPersons }.distinctBy { it.name.trim().lowercase() },
-              phoneNumbers = cards.flatMap { it.phoneNumbers }.distinct(),
-              emails = cards.flatMap { it.emails }.distinct(),
-              websites = cards.flatMap { it.websites }.distinct(),
-              addressLines = cards.flatMap { it.addressLines }.distinct(),
-              pincode = cards.firstOrNull { !it.pincode.isNullOrBlank() }?.pincode,
-              gstin = cards.firstOrNull { !it.gstin.isNullOrBlank() }?.gstin,
-              qrCodeData = cards.firstOrNull { !it.qrCodeData.isNullOrBlank() }?.qrCodeData,
-              rawText = cards.mapIndexed { idx, c -> "--- Page ${idx + 1} ---\n${c.rawText}" }.joinToString("\n\n")
-            )
+            val mergedCard = mergeMultipleCardPages(cards)
             result.putMap("data", mergedCard.toWritableMap())
           }
 

@@ -59,6 +59,9 @@ object CardLayoutParser {
         "AUTO", "ELECTRONICS", "OPTICAL", "CLINIC", "DENTAL", "LAB", "SALON",
         "SPA", "FITNESS", "GYM", "TRAVELS", "LOGISTICS", "TELECOM", "COMMUNICATIONS",
         "COMMUNICATION", "CONSULTANCY", "ASTROLOGICAL", "ASTROLOGY",
+        "MAKEOVER", "MAKEOVERS", "BEAUTY", "PARLOUR", "PARLOR", "SALON", "STUDIO", "BOUTIQUE",
+        "CREATION", "CREATIONS", "COLLECTION", "COLLECTIONS", "KITCHEN", "CUISINE",
+        "ACADEMY", "CLASSES",
         "FURNITURE", "STEEL", "SWITCHGEARS", "SWITCHGEAR", "ELECTRICALS", "ELECTRICAL",
         "LIGHTING", "POWER SYSTEMS",
         // Short but unambiguous
@@ -202,6 +205,33 @@ object CardLayoutParser {
 
     // Keywords for goods, digital badges, astrology tokens, and words that must NEVER be person names
     val NON_PERSON_KEYWORDS: Set<String> = setOf(
+        // Audience, demographics & retail customer specializations
+        "only ladies", "ladies only", "only gents", "gents only", "only kids", "kids only",
+        "for ladies", "for gents", "for kids", "women only", "men only", "family salon",
+        "all types of", "all kinds of", "wholesale & retail", "wholesale and retail",
+        "dealers in", "specialists in", "specialist in", "exclusive showroom", "exclusive store",
+        "open 24 hours", "home delivery", "free delivery",
+        "फक्त महिलांसाठी", "महिलांसाठी", "फक्त लेडीज", "लेडीज स्पेशल",
+        // IT, Surveillance, Security, Repairing & Service Offerings
+        "our services", "services", "products", "offerings", "specialities", "solutions",
+        "computer", "computers", "laptop", "laptops", "printer", "printers", "cctv", "cctv camera",
+        "camera", "cameras", "door lock", "door lock system", "lock system", "intercom", "epbx", "epabx",
+        "intercom system", "networking", "biometric", "attendance machine", "video door phone",
+        "door phone", "repairing", "refilling", "recovery", "data recovery", "maintenance", "amc",
+        "annual maintenance", "tonner", "toner", "tonner refilling", "toner refilling", "installation",
+        "surveillance", "access control", "fire alarm", "security systems", "hardware", "software",
+        "cartridge", "ink refill", "antivirus", "anti virus", "system", "systems",
+        // Marathi trade / service keywords
+        "दुरुस्ती", "सर्व्हिसिंग", "देखभाल", "इन्स्टॉलेशन", "नेटवर्किंग", "कम्प्युटर", "लॅपटॉप", "प्रिंटर",
+        "सीसीटीव्ही", "कॅमेरा", "आमच्या सेवा", "सेवा",
+        // Fitness, Gym, Training, Sports & Wellness Offerings
+        "transformation", "zumba", "crossfit", "pilates", "aerobics", "six pack", "abs blast",
+        "diet plan", "wellness", "boot camp", "cardio", "weight training", "lose weight", "yoga",
+        "marathon", "qubo training", "ramfit training", "sunsalutation", "sun salutation", "cpr aed",
+        "never give up", "no pain no gain", "functional programme", "functional training",
+        "coach diet plan", "workout", "outdoor workout", "endurance", "strength training", "agility",
+        "v-shape", "martial arts", "kick boxing", "body building", "sports training", "gym workout",
+        "training", "trainings", "gym", "fitness",
         // Digital badges, stores & app download instructions
         "app store", "google play", "play store", "download", "scan", "qr", "qr code", "code", "app", "apps",
         "get it on", "dowrod", "from", "app from", "click here", "scan qr", "scan qr code", "ios", "android",
@@ -287,28 +317,35 @@ object CardLayoutParser {
         companyBlock?.text?.lines()?.forEach { usedLineTexts.add(it.trim()) }
         companyName?.split(" ")?.filter { it.length > 2 }?.forEach { usedLineTexts.add(it.trim()) }
 
-        // 2. Guess Contact Persons & Roles (column-aware)
+        // 2. Pre-extract Provided Services & Offerings (bullet points, "OUR SERVICES" section, product lists)
+        val providedServices = guessProvidedServices(allLines, usedLineTexts)
+        providedServices.forEach { usedLineTexts.add(it.trim()) }
+        allLines.forEach { l ->
+            val t = l.text.trim()
+            if (BULLET_PREFIX_REGEX.containsMatchIn(t) || SERVICES_SECTION_HEADER_REGEX.matches(t)) {
+                usedLineTexts.add(t)
+                usedLineTexts.add(t.replace(BULLET_PREFIX_REGEX, "").trim())
+            }
+        }
+
+        // 3. Guess Contact Persons & Roles (column-aware)
         val contactPersons = guessPersonAndRole(columns, roleKeywords, usedLineTexts)
         contactPersons.forEach { person ->
             usedLineTexts.add(person.name.trim())
             person.role?.let { usedLineTexts.add(it.trim()) }
         }
 
-        // 3. Guess Slogan / Quote
+        // 4. Guess Slogan / Quote
         val slogan = guessSlogan(allLines, usedLineTexts)
         if (slogan != null) usedLineTexts.add(slogan.trim())
 
-        // 4. Guess Address Lines (proximity clustering, strictly guarding against slogans/taglines)
+        // 5. Guess Address Lines (proximity clustering, strictly guarding against slogans/taglines)
         val addressLines = guessAddressLines(allLines, locationKeywords, usedLineTexts)
         addressLines.forEach { usedLineTexts.add(it.trim()) }
 
-        // 5. Guess Tagline (short line / business description)
+        // 6. Guess Tagline (short line / business description)
         val tagline = guessTagline(allLines, companyBlock, addressLines, usedLineTexts)
         if (tagline != null) usedLineTexts.add(tagline.trim())
-
-        // 6. Guess Provided Services & Offerings (lists of products / goods / offerings)
-        val providedServices = guessProvidedServices(allLines, usedLineTexts)
-        providedServices.forEach { usedLineTexts.add(it.trim()) }
 
         return CardLayoutFields(
             companyName = companyName,
@@ -325,18 +362,27 @@ object CardLayoutParser {
      * (e.g. "MCB Box, Junction Box, Fan Box, Modular Box, Concealed Box etc.").
      */
     fun guessProvidedServices(allLines: List<RawLine>, usedLineTexts: Set<String>): List<String> {
-        val serviceLines = allLines.filter { line ->
-            val text = line.text.trim()
-            !usedLineTexts.contains(text) &&
-            !isContactInfo(text) &&
-            !looksLikePureAddress(text) &&
-            !isReligiousInvocation(text) &&
-            looksLikeProductOrServiceList(text)
-        }
-
         val result = mutableListOf<String>()
-        for (line in serviceLines) {
-            result.addAll(parseServicesList(line.text))
+        val headerLine = allLines.firstOrNull { SERVICES_SECTION_HEADER_REGEX.matches(it.text.trim()) }
+        val headerTop = headerLine?.boundingBox?.bottom ?: -1
+
+        for (line in allLines) {
+            val raw = line.text.trim()
+            if (raw.isBlank() || usedLineTexts.contains(raw) || isContactInfo(raw) || looksLikePureAddress(raw) || isReligiousInvocation(raw)) continue
+            if (SERVICES_SECTION_HEADER_REGEX.matches(raw)) continue
+
+            val hasBullet = BULLET_PREFIX_REGEX.containsMatchIn(raw)
+            val isUnderHeader = headerTop >= 0 && line.boundingBox.top >= headerTop - 10
+            val looksLikeList = looksLikeProductOrServiceList(raw)
+            val lower = raw.lowercase()
+            val hasServiceKw = listOf("repairing", "refilling", "maintenance", "recovery", "installation", "networking", "biometric", "intercom", "cctv", "camera", "door lock", "amc", "attendance").any { lower.contains(it) }
+
+            if (hasBullet || (isUnderHeader && (hasBullet || raw.length in 3..45)) || looksLikeList || hasServiceKw) {
+                val clean = raw.replace(BULLET_PREFIX_REGEX, "").trim()
+                if (clean.isNotBlank() && clean.length > 1 && !SERVICES_SECTION_HEADER_REGEX.matches(clean)) {
+                    result.addAll(parseServicesList(clean))
+                }
+            }
         }
         return result.distinct()
     }
@@ -391,6 +437,10 @@ object CardLayoutParser {
 
     fun hasCompanyIndicator(text: String): Boolean {
         if (text.isBlank()) return false
+        // Commercial possessive brand: e.g. "Ishani's Makeover", "Raju's Kitchen"
+        if (Regex("""\b[A-Za-z0-9&]+'s\s+[A-Za-z0-9&]+""", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return true
+        }
         val upper = text.uppercase().trim()
         val tokens = upper.split(TOKEN_DELIMITERS)
         for (token in tokens) {
@@ -546,6 +596,8 @@ object CardLayoutParser {
             !isReligiousInvocation(text) &&
             !looksLikePureAddress(text) &&
             !looksLikeProductOrServiceList(text) &&
+            !SERVICES_SECTION_HEADER_REGEX.matches(text) &&
+            !BULLET_PREFIX_REGEX.containsMatchIn(text) &&
             // Reject blocks that contain ONLY contact info and NO company indicator
             !(FieldExtractor.extractPhoneNumbers(text).isNotEmpty() &&
               !hasCompanyIndicator(text)) &&
@@ -561,6 +613,14 @@ object CardLayoutParser {
         val bestBlock = candidates.maxByOrNull { block ->
             var score = 0
 
+            // Personal salutation / title penalty: prevent doctor/advocate names from taking company slot
+            val lowerTrimmed = block.text.trim().lowercase()
+            if (matchSalutation(block.text) != null ||
+                lowerTrimmed.startsWith("dr.") || lowerTrimmed.startsWith("adv.") ||
+                lowerTrimmed.contains("m.d.") || lowerTrimmed.contains("mbbs") ||
+                lowerTrimmed.contains("consulting physician") || lowerTrimmed.contains("legal consultant")) {
+                score -= 150
+            }
             // 1. Font height score — raw pixel height is the primary signal.
             //    Multiply by 3 so a genuinely larger font dominates by a wide margin.
             val lineCount = block.lines.size.coerceAtLeast(1)
@@ -623,8 +683,22 @@ object CardLayoutParser {
                     kotlin.math.abs(other.boundingBox.left - block.boundingBox.left) <= block.boundingBox.width &&
                     other.text.trim().length in 3..35
                 }
+                val suffixBlock = if (block.text.trim().endsWith("'s", ignoreCase = true)) {
+                    blocks.firstOrNull { other ->
+                        other != block &&
+                        !isReligiousInvocation(other.text) &&
+                        !isContactInfo(other.text) &&
+                        !looksLikePureAddress(other.text) &&
+                        other.boundingBox.top >= block.boundingBox.bottom - 20 &&
+                        other.boundingBox.top - block.boundingBox.bottom <= block.boundingBox.height * 1.8 &&
+                        other.text.trim().length in 3..35
+                    }
+                } else null
+
                 if (prefixBlock != null) {
                     "${prefixBlock.text.trim()} ${block.text.trim()}"
+                } else if (suffixBlock != null) {
+                    "${block.text.trim()} ${suffixBlock.text.trim()}"
                 } else {
                     block.text.trim()
                 }
@@ -1084,9 +1158,17 @@ object CardLayoutParser {
      *  - Words are 2–20 chars each (not abbreviations or numbers)
      *  - Does NOT look like a company, address, or slogan
      */
+    val SERVICES_SECTION_HEADER_REGEX = Regex("""(?i)^\s*(?:our\s+)?(?:services|products|offerings|specialities|solutions|deals\s+in|we\s+offer|facilities|amenities)(?:\s*[:\-–])?\s*$""")
+    val BULLET_PREFIX_REGEX = Regex("""^[>►•▪*\-✔✓+→\u2022\u25BA\u25B6]+\s*|^[0-9]+[\.\)]\s+""")
+
+    val DEMOGRAPHIC_AUDIENCE_REGEX = Regex("""(?i)^\s*(?:(?:only\s+)?(?:ladies|women|gents|men|kids|boys|girls|children)(?:\s+only)?|(?:for\s+)?(?:ladies|women|gents|men|kids)(?:\s+only)?|(?:ladies|women)\s*(?:&|and)\s*(?:gents|men|kids)|all\s+types\s+of|specialists?\s+in|exclusive\s+showroom|wholesale\s*(&|and)?\s*retail)\s*$""")
+
     fun looksLikePersonNameByTitleCase(text: String): Boolean {
         val clean = text.trim()
         if (clean.isBlank()) return false
+        if (BULLET_PREFIX_REGEX.containsMatchIn(clean)) return false
+        if (SERVICES_SECTION_HEADER_REGEX.matches(clean)) return false
+        if (DEMOGRAPHIC_AUDIENCE_REGEX.containsMatchIn(clean)) return false
         // Person names do not contain commas or ellipsis
         if (clean.contains(',') || clean.contains("...") || clean.contains("…")) return false
         // Person names don't contain slogan/tagline keywords or company indicators
@@ -1129,6 +1211,9 @@ object CardLayoutParser {
 
     fun isValidPersonName(text: String, alreadyUsed: Set<String>): Boolean {
         if (text.isBlank() || alreadyUsed.contains(text)) return false
+        if (BULLET_PREFIX_REGEX.containsMatchIn(text.trim())) return false
+        if (SERVICES_SECTION_HEADER_REGEX.matches(text.trim())) return false
+        if (DEMOGRAPHIC_AUDIENCE_REGEX.containsMatchIn(text.trim())) return false
         if (text.length > 55) return false
         val lower = text.trim().lowercase()
         if (CONTACT_LABEL_KEYWORDS.contains(lower)) return false
@@ -1230,7 +1315,8 @@ data class RawBlock(
 
 data class ContactPerson(
     val name: String,
-    val role: String? = null
+    val role: String? = null,
+    val phones: List<String> = emptyList()
 )
 
 data class CardLayoutFields(

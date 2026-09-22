@@ -6,6 +6,11 @@
  */
 import NativeCardLens from './NativeCardLens';
 import { recognizeTextWithPaddle } from './PaddleOCR';
+import {
+  isValidPersonCandidate,
+  BULLET_PREFIX_REGEX,
+  SERVICES_SECTION_HEADER_REGEX,
+} from './LocalCardLLM';
 import type {
   RawOcrResult,
   BarcodeResult,
@@ -42,6 +47,7 @@ export type {
   ContactFields,
   LabeledPhone,
   ContactPerson,
+  StructuredAddress,
   CardLayoutFields,
   BusinessCard,
   LineItem,
@@ -345,16 +351,72 @@ async function scanCardPagesPaddle(
       ?.companyName,
     tagline: pagesData.find((c) => Boolean(c.tagline?.trim()))?.tagline,
     slogan: pagesData.find((c) => Boolean(c.slogan?.trim()))?.slogan,
-    providedServices: Array.from(
-      new Set(pagesData.flatMap((c) => c.providedServices || []))
-    ),
-    contactPersons: Array.from(
-      new Map(
-        pagesData
-          .flatMap((c) => c.contactPersons || [])
-          .map((p) => [p.name.trim().toLowerCase(), p])
-      ).values()
-    ),
+    ...(() => {
+      const primaryPage = pagesData.reduce((best, cur) => {
+        const scoreCur =
+          (cur.phoneNumbers?.length || 0) * 10 +
+          (cur.emails?.length || 0) * 10 +
+          (cur.addressLines?.length || 0) * 5 +
+          (cur.contactPersons?.some((p) => Boolean(p.role)) ? 20 : 0);
+        const scoreBest =
+          (best.phoneNumbers?.length || 0) * 10 +
+          (best.emails?.length || 0) * 10 +
+          (best.addressLines?.length || 0) * 5 +
+          (best.contactPersons?.some((p) => Boolean(p.role)) ? 20 : 0);
+        return scoreCur >= scoreBest ? cur : best;
+      }, pagesData[0]!);
+
+      const validPersons: any[] = [];
+      const redirectedServices: string[] = [];
+
+      for (const page of pagesData) {
+        const isPrimary = page === primaryPage;
+        const pageHasContacts =
+          (page.phoneNumbers?.length || 0) > 0 ||
+          (page.emails?.length || 0) > 0;
+
+        for (const p of page.contactPersons || []) {
+          const hasExplicitRole = Boolean(p.role?.trim());
+          const hasSalutation = /^(?:Dr\.|Adv\.|Mr\.|Mrs\.|Ms\.|Shri\b)/i.test(
+            p.name
+          );
+          const hasAttachedPhone = (p.phones?.length || 0) > 0;
+          const isAnchored =
+            hasExplicitRole ||
+            hasSalutation ||
+            hasAttachedPhone ||
+            (isPrimary && pageHasContacts);
+
+          if (isAnchored && isValidPersonCandidate(p.name)) {
+            if (
+              !validPersons.some(
+                (vp) => vp.name.toLowerCase() === p.name.trim().toLowerCase()
+              )
+            ) {
+              validPersons.push(p);
+            }
+          } else {
+            const clean = p.name.replace(BULLET_PREFIX_REGEX, '$1').trim();
+            if (
+              clean.length >= 2 &&
+              !SERVICES_SECTION_HEADER_REGEX.test(clean)
+            ) {
+              redirectedServices.push(clean);
+            }
+          }
+        }
+      }
+
+      return {
+        contactPersons: validPersons,
+        providedServices: Array.from(
+          new Set([
+            ...pagesData.flatMap((c) => c.providedServices || []),
+            ...redirectedServices,
+          ])
+        ),
+      };
+    })(),
     phoneNumbers: Array.from(
       new Set(pagesData.flatMap((c) => c.phoneNumbers || []))
     ),
@@ -372,9 +434,12 @@ async function scanCardPagesPaddle(
     ),
     pincode: pagesData.find((c) => Boolean(c.pincode?.trim()))?.pincode,
     gstin: pagesData.find((c) => Boolean(c.gstin?.trim()))?.gstin,
-    rawText: pagesData
-      .map((c, i) => `--- Page ${i + 1} ---\n${c.rawText}`)
-      .join('\n\n'),
+    rawText:
+      pagesData.length === 1
+        ? pagesData[0]?.rawText || ''
+        : pagesData
+            .map((c, i) => `--- Page ${i + 1} ---\n${c.rawText}`)
+            .join('\n\n'),
   };
 }
 

@@ -180,19 +180,16 @@ interface DeterministicExtractionResult {
 ## Engine 5: Native Semantic Thinking Engine
 
 * **Implementation File:** [`android/src/main/java/com/cardlens/ThinkingModuleEngine.kt`](file:///Users/baliramshejal/react-native-card-lens/android/src/main/java/com/cardlens/ThinkingModuleEngine.kt)  
-* **Underlying Technology:** Native Kotlin semantic reasoner & contextual entity boundary solver (100% dynamic, zero hardcoded card overrides)  
+* **Underlying Technology:** Native Kotlin semantic reasoner & contextual entity boundary solver  
 * **Execution Environment:** Native Android (<40ms)  
 
-### 1. Input Parameters & Dynamic Heuristics
+### 1. Input Parameters
 
-| Parameter / Strategy | Type | Details | Purpose |
+| Parameter / Dictionary | Type | Details | Purpose |
 |---|---|---|---|
 | `rawText` | `String` | Input | Raw text from OCR. |
 | `RELIGIOUS_HEADERS` | `List<String>` | `॥ परमात्मा एक ॥`, `।। श्री गणेशाय नमः ।।`, `श्री जानूबाई प्रसन्न`, etc. | Religious invocations stripped to prevent misclassification as company/person names. |
-| `domainSlugs` Dynamic Reconciliation | `List<String>` | Dynamically parsed from emails (`@domain.com` vs `@gmail.com`) and website URLs | Reconciles line tokens with domain slugs in real time; triggers lookahead to line $N+1$ when line $N$ is only a partial brand prefix. |
-| `multiLineBrandCompany` Synthesizer | Dynamic Algorithm | `!prevHasCategory && hasCategory && lineIsCategoryOnly` | Dynamically merges 2-line logos (e.g. brand noun on Line $N$ + trade category on Line $N+1$) across the entire `businessTypes` taxonomy without hardcoded brand names. |
-| `emailSynthesizedCompany` Segmenter | Dynamic Algorithm | Suffix segmentation via `businessTypes` (e.g. `varietysports` $\to$ `VARIETY` + `SPORTS`) | Synthesizes company brand name when card only contains person and contact details with no explicit company line. |
-| `LIGATURE_NORMALIZERS` | String replacements | `मोटसी` $\to$ `मोटर्स`, `गुभुगीबिंद शिंग` $\to$ `गुरुगोविंद सिंग` | Normalizes noisy Indic OCR ligatures at ingestion time so trade categories match dynamically. |
+| `BRAND_JOIN_RULES` | `Map<Regex, String>` | e.g. `Cakes` + `Inn` $\to$ `Cakes Inn`, `BHARAT` + `SPORTS` $\to$ `BHARAT SPORTS` | Synthesizes stylized multi-line logo fragments. |
 | `PHONE_PREFIX_PATTERN` | `Regex` | `^([A-Za-z\s]{3,25})\s*[:\-–]\s*([6-9]\d{9})` | Extracts owner name printed directly beside their direct mobile number. |
 | `NON_PERSON_KEYWORDS` | `Set<String>` | 150+ terms (Zodiac signs, App store terms, corporate suffixes, product catalogs) | Strict negative constraints that disqualify words from being extracted as human contact persons. |
 | `maxPersonNameWords` | `Int` | `3` words | Disqualifies any phrase longer than 3 words from being a human name. |
@@ -223,7 +220,7 @@ interface BusinessCard {
 ## Engine 6: Hybrid Universal Fusion Engine
 
 * **Implementation File:** [`src/LocalCardLLM.ts`](file:///Users/baliramshejal/react-native-card-lens/src/LocalCardLLM.ts) (`extractHybridUniversalCard`)  
-* **Underlying Technology:** Multi-engine arbitration layer & spatial text sanitizer (zero hardcoded card overrides)  
+* **Underlying Technology:** Multi-engine arbitration layer & spatial text sanitizer  
 * **Execution Environment:** TypeScript Runtime (<10ms)  
 
 ### 1. Input Parameters
@@ -238,7 +235,6 @@ interface BusinessCard {
 1. **Phone Inviolability:** Deterministic phones are *always* preserved. If the layout candidate missed secondary/branch phones, deterministic phones are merged.
 2. **Address Cleanup:** Street addresses are sanitized by removing embedded mobile numbers, emails, and GSTIN strings.
 3. **Tagline vs Service Catalog:** Short single-line mission statements are assigned to `tagline`; multi-item bulleted/comma-separated lists are routed to `providedServices`.
-4. **Dynamic Domain Slug Prioritization:** Disambiguates company name by matching alphanumeric character sequences with corporate email domains or website hostnames.
 
 ### 2. Engine Outputs
 
@@ -259,7 +255,7 @@ interface BusinessCard {
 
 | Evaluation Dimension | Maximum Points | Sub-Conditions & Scoring Logic |
 |---|---|---|
-| **Company Name Strength** | **30 pts** | • `+15 pts`: Company name present & $\ge 3$ characters.<br>• `+15 pts`: Contains corporate/trade suffix (`PVT LTD`, `INDUSTRIES`, `MOTORS`, `CLINIC`, `ASSOCIATES`, `CONSULTANTS`, `LEGAL`, `ADVISORY`, `DEVELOPERS`, `INFRA`, `BUILDERS`, `ENGINEERING`, `MANUFACTURING`, etc.). |
+| **Company Name Strength** | **30 pts** | • `+15 pts`: Company name present & $\ge 3$ characters.<br>• `+15 pts`: Contains corporate/trade suffix (`PVT LTD`, `INDUSTRIES`, `MOTORS`, `CLINIC`, etc.). |
 | **Contact Reachability** | **30 pts** | • `+15 pts`: At least 1 valid mobile/landline number.<br>• `+5 pts`: Multi-phone bonus ($\ge 2$ numbers).<br>• `+10 pts`: Valid email domain present. |
 | **Person & Professional Title** | **20 pts** | • `+10 pts`: At least 1 valid contact person extracted.<br>• `+10 pts`: Verified title attached (`Director`, `Advocate`, `Proprietor`, `Partner`, `Doctor`, etc.). |
 | **Statutory / Address Verification** | **20 pts** | • `+10 pts`: Valid 6-digit Indian PIN code.<br>• `+10 pts`: Checksum-verified 15-character GSTIN. |

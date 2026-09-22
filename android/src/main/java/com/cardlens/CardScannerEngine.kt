@@ -154,14 +154,17 @@ object CardScannerEngine {
         enableThinkingRefinement: Boolean = true
     ): BusinessCard {
         val t0 = System.currentTimeMillis()
-        val contactFields = FieldExtractor.extractContactFields(rawText)
+        val cleanRawText = rawText.lines()
+            .filter { !it.trim().matches(Regex("""(?i)^---+\s*Page\s*\d+\s*---+$""")) }
+            .joinToString("\n")
+        val contactFields = FieldExtractor.extractContactFields(cleanRawText)
         val t1 = System.currentTimeMillis()
         android.util.Log.i("CardLensSpeed", "    -> extractContactFields took ${t1 - t0}ms")
 
-        val effectiveBlocks = if (blocks.isEmpty() && rawText.isNotBlank()) {
-            synthesizeBlocksFromText(rawText)
+        val effectiveBlocks = if (blocks.isEmpty() && cleanRawText.isNotBlank()) {
+            synthesizeBlocksFromText(cleanRawText)
         } else {
-            blocks
+            blocks.filter { !it.text.trim().matches(Regex("""(?i)^---+\s*Page\s*\d+\s*---+$""")) }
         }
         val t2 = System.currentTimeMillis()
         android.util.Log.i("CardLensSpeed", "    -> synthesizeBlocks took ${t2 - t1}ms")
@@ -185,7 +188,7 @@ object CardScannerEngine {
             pincode = contactFields.pincodes.firstOrNull(),
             gstin = contactFields.gstin.firstOrNull(),
             qrCodeData = qrCodeData,
-            rawText = rawText
+            rawText = cleanRawText
         )
 
         if (!enableThinkingRefinement || rawText.isBlank()) {
@@ -193,7 +196,7 @@ object CardScannerEngine {
         }
 
         // Semantic refinement via ThinkingModuleEngine
-        val refined = ThinkingModuleEngine.refineCard(rawText)
+        val refined = ThinkingModuleEngine.refineCard(cleanRawText)
         val finalCompany = when {
             !refined.companyName.isNullOrBlank() && (
                 candidateCard.companyName.isNullOrBlank() ||
@@ -377,7 +380,7 @@ object CardScannerEngine {
      * Synthesize visual layout geometry for plain text lines (e.g. from tests or thinking module).
      */
     fun synthesizeBlocksFromText(rawText: String): List<RawBlock> {
-        val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() && !it.matches(Regex("""(?i)^---+\s*Page\s*\d+\s*---+$""")) }
         if (lines.isEmpty()) return emptyList()
 
         return lines.mapIndexed { index, lineText ->

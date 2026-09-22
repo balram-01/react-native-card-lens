@@ -435,6 +435,27 @@ export interface ContactFields {
 export interface ContactPerson {
   name: string;
   role?: string;
+  phones?: string[];
+  email?: string;
+  isPrimary?: boolean;
+}
+
+export interface StructuredAddress {
+  type?:
+    | 'head_office'
+    | 'branch'
+    | 'factory'
+    | 'residence'
+    | 'chamber'
+    | 'general'
+    | string;
+  label?: string;
+  fullAddress: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
+  country?: string;
+  dedicatedPhone?: string;
 }
 
 export interface CardLayoutFields {
@@ -442,6 +463,7 @@ export interface CardLayoutFields {
   tagline?: string;
   contactPersons: ContactPerson[];
   addressLines: string[];
+  addresses?: StructuredAddress[];
 }
 
 export interface LabeledPhone {
@@ -456,9 +478,10 @@ export interface BusinessCard {
   tagline?: string;
   slogan?: string;
   providedServices?: string[];
-  contactPersons: { name: string; role?: string }[];
+  contactPersons: ContactPerson[];
   phoneNumbers: string[];
   labeledPhones?: LabeledPhone[];
+  addresses?: StructuredAddress[];
   /**
    * All extracted email addresses (primary is emails[0]).
    * Cards can have multiple emails (e.g. personal + work).

@@ -332,9 +332,26 @@ export default function App() {
         if (saved && saved.trim()) {
           try {
             const parsed = JSON.parse(saved);
-            const merged: LlmSettings = { ...DEFAULT_LLM_SETTINGS, ...parsed };
-            setLlmSettings(merged);
-            setTempSettings(merged);
+            if (parsed && typeof parsed === 'object') {
+              const merged: LlmSettings = {
+                ...DEFAULT_LLM_SETTINGS,
+                ...parsed,
+                cpu_mask:
+                  typeof parsed.cpu_mask === 'string'
+                    ? parsed.cpu_mask
+                    : DEFAULT_LLM_SETTINGS.cpu_mask,
+                grammar_text:
+                  typeof parsed.grammar_text === 'string'
+                    ? parsed.grammar_text
+                    : DEFAULT_LLM_SETTINGS.grammar_text,
+                stopSequences:
+                  typeof parsed.stopSequences === 'string'
+                    ? parsed.stopSequences
+                    : DEFAULT_LLM_SETTINGS.stopSequences,
+              };
+              setLlmSettings(merged);
+              setTempSettings(merged);
+            }
           } catch {}
         }
       })
@@ -634,7 +651,11 @@ export default function App() {
       // Strictly use the user-feeded prompt template
       const prompt = applyUserPrompt(userPrompt, rawText);
 
-      const stopTokens = llmSettings.stopSequences
+      const stopTokens = (
+        typeof llmSettings.stopSequences === 'string'
+          ? llmSettings.stopSequences
+          : DEFAULT_LLM_SETTINGS.stopSequences
+      )
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
@@ -665,7 +686,11 @@ export default function App() {
         completionParams.thinking_budget_tokens =
           llmSettings.thinking_budget_tokens;
       }
-      if (llmSettings.enable_grammar && llmSettings.grammar_text.trim()) {
+      if (
+        llmSettings.enable_grammar &&
+        typeof llmSettings.grammar_text === 'string' &&
+        llmSettings.grammar_text.trim()
+      ) {
         completionParams.grammar = llmSettings.grammar_text.trim();
       }
 
@@ -722,7 +747,19 @@ export default function App() {
   };
 
   const handleLoadModel = async (overrideSettings?: LlmSettings) => {
-    const settings = overrideSettings || llmSettings;
+    // If called directly from an event handler or with incomplete settings, fall back to llmSettings
+    const rawSettings =
+      overrideSettings &&
+      typeof overrideSettings === 'object' &&
+      'n_threads' in overrideSettings &&
+      !('nativeEvent' in overrideSettings)
+        ? overrideSettings
+        : llmSettings;
+
+    const settings: LlmSettings = {
+      ...DEFAULT_LLM_SETTINGS,
+      ...(rawSettings || {}),
+    };
     const targetPath = downloadedModels[universalModel.id];
 
     if (!targetPath) {
@@ -742,17 +779,17 @@ export default function App() {
 
       const ctx = await initLlama({
         model: targetPath,
-        use_mlock: settings.use_mlock,
-        use_mmap: settings.use_mmap,
-        n_ctx: settings.n_ctx,
-        n_threads: settings.n_threads,
-        n_batch: settings.n_batch,
-        n_ubatch: settings.n_ubatch,
-        flash_attn: settings.flash_attn,
-        cache_type_k: settings.cache_type_k,
-        cache_type_v: settings.cache_type_v,
-        no_extra_bufts: settings.no_extra_bufts,
-        ...(settings.cpu_mask.trim()
+        use_mlock: Boolean(settings.use_mlock),
+        use_mmap: settings.use_mmap ?? true,
+        n_ctx: settings.n_ctx || 1024,
+        n_threads: settings.n_threads || 4,
+        n_batch: settings.n_batch || 256,
+        n_ubatch: settings.n_ubatch || 64,
+        flash_attn: Boolean(settings.flash_attn),
+        cache_type_k: settings.cache_type_k || 'f16',
+        cache_type_v: settings.cache_type_v || 'f16',
+        no_extra_bufts: Boolean(settings.no_extra_bufts),
+        ...(typeof settings.cpu_mask === 'string' && settings.cpu_mask.trim()
           ? { cpu_mask: settings.cpu_mask.trim() }
           : {}),
       });
@@ -899,7 +936,7 @@ export default function App() {
               ) : isModelDownloaded ? (
                 <TouchableOpacity
                   style={styles.modelActionBtnPrimary}
-                  onPress={handleLoadModel}
+                  onPress={() => handleLoadModel()}
                   disabled={slmLoading}
                   activeOpacity={0.8}
                 >
@@ -2117,7 +2154,7 @@ export default function App() {
                     </Text>
                     <TextInput
                       style={styles.settingsTextInput}
-                      value={tempSettings.stopSequences}
+                      value={tempSettings.stopSequences ?? ''}
                       onChangeText={(val) =>
                         setTempSettings({ ...tempSettings, stopSequences: val })
                       }
@@ -2196,7 +2233,7 @@ export default function App() {
                       </Text>
                       <TextInput
                         style={[styles.settingsTextInput, { minHeight: 100 }]}
-                        value={tempSettings.grammar_text}
+                        value={tempSettings.grammar_text ?? ''}
                         onChangeText={(val) =>
                           setTempSettings({
                             ...tempSettings,
@@ -2739,7 +2776,7 @@ export default function App() {
                     </Text>
                     <TextInput
                       style={styles.settingsTextInput}
-                      value={tempSettings.cpu_mask}
+                      value={tempSettings.cpu_mask ?? ''}
                       onChangeText={(val) =>
                         setTempSettings({ ...tempSettings, cpu_mask: val })
                       }

@@ -16,6 +16,8 @@
     "build:web": "vite build"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "@react-native-clipboard/clipboard": "^1.16.3",
     "llama.rn": "^0.13.0-rc.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",

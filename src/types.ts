@@ -595,3 +595,40 @@ export interface ScanBillOptions {
    */
   paddleOptions?: PaddleOcrOptions;
 }
+
+// ─── Simple ML Kit to LLM Flow Options & Results ───────────────────────────
+
+export interface ExtractCardMlKitToLLMOptions {
+  /**
+   * Script to use for Google ML Kit OCR ('auto', 'latin', 'devanagari'). Defaults to 'auto'.
+   */
+  script?: OcrScript;
+  /**
+   * Custom LLM inference handler (e.g. llama.rn completion or local Ollama).
+   * If not provided, CardLens uses its built-in on-device Semantic Thinking Reasoner.
+   */
+  inferenceHandler?: (prompt: string, grammar?: string) => Promise<string>;
+}
+
+export interface MlKitToLLMResult {
+  /**
+   * Total raw OCR data extracted directly from the image by Google ML Kit.
+   */
+  rawOcr: RawOcrResult;
+  /**
+   * Exact raw output string returned by the efficient LLM / Thinking module.
+   */
+  rawLlmOutput: string;
+  /**
+   * Refined and structured BusinessCard object.
+   */
+  card: BusinessCard;
+  /**
+   * Latency breakdown in milliseconds.
+   */
+  latencyMs?: {
+    ocr: number;
+    llm: number;
+    total: number;
+  };
+}

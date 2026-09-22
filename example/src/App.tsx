@@ -1,560 +1,437 @@
 /**
- * react-native-card-lens — Unified Document & Card Scanner Studio
+ * react-native-card-lens — Simple 2-Stage Flow: ML Kit ➔ Efficient LLM
  *
- * Single-screen automatic scanner that:
- *  1. Scans cards and documents with real-time auto edge detection & perspective correction
- *  2. Automatically classifies behind the scenes whether it is a Business Card or Bill/Invoice
- *  3. Seamlessly renders structured contact fields or financial line-item tables
- *  4. Provides a 100% real, dynamic On-Device LLM (llama.rn / GGUF) manager with live progress
+ * 1. Extract card text using Google ML Kit on-device OCR (Total Raw OCR).
+ * 2. Display total raw OCR data with instant copy-to-clipboard.
+ * 3. User taps "Send to Efficient LLM" (Universal Indic Module).
+ * 4. Display raw output directly from the LLM with instant copy-to-clipboard.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
   LogBox,
+  Modal,
   Platform,
+  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { initLlama, type LlamaContext } from 'llama.rn';
+import Clipboard from '@react-native-clipboard/clipboard';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 LogBox.ignoreAllLogs();
 
 import {
   startScanner,
   pickDocument,
-  scanDocument,
-  refineCardWithThinkingModule,
+  recognizeText,
   downloadThinkingModel,
-  BUSINESS_CARD_GBNF_GRAMMAR,
-  extractDeterministicUniversal,
-  extractHybridUniversalCard,
-  parseFallbackLocalBill,
 } from 'react-native-card-lens';
 import type {
   RawOcrResult,
   ScanResult,
-  BusinessCard,
-  BillDocument,
-  DocumentScanResult,
   ThinkingModelDownloadProgress,
 } from 'react-native-card-lens';
 
-// ─── Free, Non-Gated GGUF Models (llama.rn / llama.cpp) ─────────────────────
-// Keeping exclusively the Universal 1.5B model we are fine-tuning for all 8 Indian languages
+// ─── System Bar Insets for Android Notch, Edge-to-Edge & Navigation Bar ────
+const ANDROID_STATUS_BAR =
+  Platform.OS === 'android' ? (StatusBar.currentHeight ?? 36) : 0;
+const STATUS_BAR_TOP_PADDING =
+  Platform.OS === 'android' ? Math.max(ANDROID_STATUS_BAR, 36) + 10 : 20;
+const BOTTOM_NAV_PADDING = Platform.OS === 'android' ? 64 : 36;
+
+// ─── Free, Non-Gated GGUF Model (Universal Indic Edition Only) ───────────────
 const AVAILABLE_SLM_MODELS = [
   {
     id: 'qwen25-15b-universal-card-q4',
-    name: 'Qwen2.5-1.5B Universal Indic Edition',
-    tag: 'Universal (8 Languages)',
+    name: 'Qwen2.5-1.5B Universal Indic',
+    tag: 'Universal Indic Edition (1.0 GB)',
     sizeMB: 986,
     url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf',
     filename: 'qwen2.5-1.5b-instruct-q4_k_m.gguf',
     description:
-      'Universal Indic card SLM fine-tuned for all 8 Indian languages (Marathi, Hindi, Gujarati, Tamil, Telugu, Kannada, Bengali, English). High capacity 1.5B parameters.',
+      'Universal 1.5B model specialized for multilingual Indian business cards (Hindi, Marathi, Gujarati, Tamil, Telugu, Bengali, Kannada, English).',
   },
 ];
 
-// ─── Realistic Samples (Cards & Invoices) ──────────────────────────────────
-const SAMPLE_DOCUMENTS = [
-  {
-    title: '🛋️ वैष्णवी (Marathi Furniture & Steel)',
-    type: 'card' as const,
-    subtitle: 'Devanagari numerals, Popat Jamdade, Pandharpur',
-    text: `पोपट जमदाडे  !! श्री जानूबाई देवी प्रसन्न !!
-मो. ८६०५७७०२९२
-     ८६०५७७०२९६
+// ─── User Editable Prompt Template & Storage ────────────────────────────────
+const PROMPT_STORAGE_KEY = '@cardlens_user_llm_prompt';
 
-वैष्णवी
-स्टील, फर्निचर अॅन्ड इलेक्ट्रॉनिक्स
-लग्न बस्त्याचे माहेरघर
+const DEFAULT_PROMPT_TEMPLATE = `<|im_start|>system
+You are a business card field mapper.
+You receive OCR text from a business card. Your only job is to map text tokens into the correct JSON fields.
+The OCR engine has already found the text — do not invent or guess values not present in the text.
 
-आमच्याकडे सोफासेट, डायनिंग टेबल, कपाट,
-स्टिल, फर्निचर, ऑफीस टेबल, फ्रिज, कुलर,
-एल ई डी सर्व इलेक्ट्रॉनिक्स वस्तु व लग्नकार्यासाठी
-लागणाऱ्या सर्व वस्तु व भांडी होलसेल दरात मिळतील.
+FIELD RULES:
 
-पंढरपूर टेंभुर्णी रोड, भोसे (क), HP पेट्रोलपंपा शेजारी ता. पंढरपूर`,
-  },
-  {
-    title: '🏏 Bharat Sports (Wholesale & Retail)',
-    type: 'card' as const,
-    subtitle: 'Ayyaz Bhai, 4 Mobiles, Sitabuldi Nagpur',
-    text: `AYYAZ BHAI : 8484940121
-9373129250
-8446077757
-7775066777
+companyName
+  - The business or shop name. Usually the largest text or at the top.
+  - Can be in any language (Hindi, Marathi, English).
+  - NOT a person's name. NOT a building name (Towers, Plaza, Complex, Chambers).
+  - If the email is "info@bharat_sports.com" and no company line exists, derive: "BHARAT SPORTS".
 
-CARROM BOARD
-Shop No. 29 Maharaj Bag Road, Variety
-Sqaure, Sitabuldi, Nagpur - 440012
+tagline
+  - A short slogan or motto, usually below the company name.
+  - Typically starts with words like "The", "Your", "Trusted", "We", "For".
+  - If absent: null.
 
-BHARAT
-SPORTS
+contactPersons
+  - Human names only. Usually 1-3 words. Has an honorific or title nearby (Prop., MD, Dr., Adv., CA, Owner).
+  - NOT company names. NOT building names. NOT product names.
+  - If no person is named on the card: [].
 
-Whiole Seller & Rehailer of High :
-Quality of All Sports Goods
+phoneNumbers
+  - 10-digit Indian mobile numbers starting with 6, 7, 8, or 9.
+  - Landlines: may have STD code prefix (e.g. 0712-2233445 → include as-is).
+  - Strip labels like "M:", "Ph:", "Cell:", "Mob:".
+  - Include ALL numbers found. Do not drop secondary numbers.
 
-Email : bharatsports29@gmail.com
-www. bahratsportsnagpur.com`,
-  },
-  {
-    title: '💻 Hesten Solutions (IT Services)',
-    type: 'card' as const,
-    subtitle: 'Hemlata Jawanjal CEO, Nagpur & Amsterdam',
-    text: `Hemlata Jawanjal
-CEO & FOUNDER
-+91 7385067604, 9588488259
-hemlata@hestensolutions.com
-www.hestensolutions.com
+emails
+  - Standard email format. Fix obvious OCR errors: "(a)" or "[at]" → "@", "gmai1" → "gmail".
 
-32/1, RMS. Collony Durga Nagar Old Subhedar Layout Nagpur, India - 440024
-336, Bos en Lommerweg, 1061 DJ, Amsterdam Netherland
+websites
+  - URLs or domains. Strip "http://", "www." prefix if present to keep just the domain.
+  - Do not include emails as websites.
 
-Hesten Solutions Pvt. Ltd.
-• Web & Mobile App Development Software Solutions
-• Billing Software • Website Designing • Digital Marketing
-• Advertising with Meta Ads • Google Listing • Google Adds`,
-  },
-  {
-    title: '📱 Mahakal Telecom (Mobile Spares)',
-    type: 'card' as const,
-    subtitle: 'Patel, 2 Mobiles, Sitabuldi Nagpur',
-    text: `।। श्री गणेशाय नमः ।।
-Patel : 9983032493
-9881199533
+addresses (array of strings)
+  - Street address lines. May include area, landmark, city.
+  - Remove any phone number or email that leaked into the address text.
+  - If multiple branch locations separated by "|" or numbered (1., 2.), split into separate array items.
 
-MAHAKAL TELECOM
-ALL MOBILE SPARE PARTS, FOLDER, LCD & TOUCH (WHOLESALE)
-Shop No. G.F-13A, Rahul Bazar Complex, Main Road, Beside Sonchala Jewellers, Sitabuldi, Nagpur.`,
-  },
-  {
-    title: '👗 गुरुगोविंद सिंग फॅशन साडी',
-    type: 'card' as const,
-    subtitle: 'Amar & Jatin Jiwnani, Badkas Chowk Nagpur, GSTIN',
-    text: `GSTIN : 27ADIPJ3019R1Z4
-गुभुगीबिंद शिंग
-फॅशन साडी
-राम भंडार होटल के सामने, बडकस चौक, नागपूर
-Amar Jiwnani : 9370002379  Jatin Jiwnani : 9373783433
-कम्पलीट फॅमिली शॉप`,
-  },
-  {
-    title: '📈 राजस मार्केटींग (Marathi Marketing)',
-    type: 'card' as const,
-    subtitle: 'Mr. Rajesh T. Bokade, 3 Mobiles, New Diamond Nagar',
-    text: `॥ परमात्मा एक ॥
-Mr. Rajesh T. Bokade
-M.: 9146496994
-राजस
-9373662998
-राजस मार्केटींग ॲन्ड सेल्स प्रा. लि.
-एक नई सोच जो आपकी जिंदगी बदल दे.....
-ऑफीस पत्ता : ६६ न्यु डायमंड नगर, खर्बी रोड, माता मंदीर के पास, नागपूर. M. No: (Off) 8888120511
-Res Add : १०, न्यु डायमंड नगर, खर्बी रोड, नागपूर.`,
-  },
-  {
-    title: '🔮 Rashidham Astrological (Consultancy)',
-    type: 'card' as const,
-    subtitle: 'Vedic Astrology & Vastu, Dharampeth Nagpur',
-    text: `RASHIDHAM ASTROLOGICAL CONSULTANCY
-NEAR ZENDA CHOWK, GAJANAN TEMPLE ROAD, DHARAMPETH, NAGPUR- 440010 (MH). MOB: -91 77760 72277, 8767375280
-CONTACT@RASHIDHAM.COM
-WWW.RASHIDHAM.COM
-VEDIC ASTROLOGY, ASTRO NUMEROLOGY, TAROT, HEALING, VASTU, GEMSTONES & PUJA RITUALS`,
-  },
-  {
-    title: '🎂 Cakes Inn (5 Branches & 5 Phones)',
-    type: 'card' as const,
-    subtitle: 'Bakery chain across Nagpur with branch phones',
-    text: `Cakes Inn
-www.cakesinn.com
+pincode
+  - Exactly 6 digits, starts with 1-9. null if absent.
 
-265-A, Shivkripa Appartment, Laxmi Nagar Square | 95270 00045
-Plot No. 21/22/23/24, Center One Complex Near NMC Octroi Naka, Hingna Road | 95279 00033
-Opp. Saraf Chambers, Mount Road, Sadar | 95270 00204
-Naga Putla Square, Post Office Road, Gandhibagh | 95270 00012
-Plot No. 1 Near Epicure Food Plaza Under Pass Road Manish Nagar | 95270 00773`,
-  },
-  {
-    title: '🏍️ साहु मोटर्स (Marathi EV Dealership)',
-    type: 'card' as const,
-    subtitle: 'Mayuri E-Rickshaw & E-Bike, Manewada Chowk Nagpur',
-    text: `साहु मोटर्स
-सेल्स सर्व्हिस अँड स्पेअर्स
-MAYURI
-Mob. 8888832104
-9921563630
-0712-2233445
-■ ई-रिक्षा
-■ ई-बाईक
-पत्ता : श्री नगर, मानेवाडा चौक, नागपूर - ४४००२४
-GSTIN: 27AAPFU0939F1ZV`,
-  },
-  {
-    title: '🏆 Variety Sports (Two-Sided Card)',
-    type: 'card' as const,
-    subtitle: 'Sagar Panjwani, GSTIN, Sitabuldi Nagpur',
-    text: `VARIETY SPORTS
-SAGAR PANJWANI
-• 7769020832
-• 9890774044
-GST No. 27BZLPP6133N2ZN
-• varietysports.nagpur@gmail.com
-• 9 & 10, Maharaj Bagh Road, Sitabuldi, Nagpur - 440 001`,
-  },
-  {
-    title: '🏥 Southwestern Vermont Medical Center (Bill)',
-    type: 'bill' as const,
-    subtitle: 'Medical Hospital Invoice with $1,892.00 Due',
-    text: `SOUTHWESTERN VERMONT MEDICAL CENTER
-BILL TO: Patient
-Invoice #: INV-883842
-Invoice Date: May 27, 2025
-Due Date: Jun 26, 2025
-AMOUNT DUE $1,892.00
-Subtotal $1,892.00
-Call our Patient Financial Services at (802) 885-7531
-PO Box 2000, Bennington, VT 05201`,
-  },
-  {
-    title: '🩺 Good Faith Estimate (GFE Medical)',
-    type: 'bill' as const,
-    subtitle: 'Colonoscopy GFE, Total $3,450, Amount Owed $2,200',
-    text: `Good Faith Estimate (GFE) - Colonoscopy
-Patient Name: John Doe
-Provider / Facility Information:
-ABC Gastroenterology Associates
-XYZ Endoscopy Center
-123 Medical Plaza, Suite 100
-Total Estimated Cost: $3,450
-Amount Owed: $2,200`,
-  },
-  {
-    title: '📄 Highmark Copley Hospital (Insurance)',
-    type: 'bill' as const,
-    subtitle: 'Health Insurance Claim, Vedansh Chopkar, $252.00',
-    text: `HIGHMARK
-Provider: COPLEY HOSPITAL
-Member: VEDANSH C CHOPKAR
-Date (s) of Service: 04/27/26
-TOTALS: $252.00
-Claim # 22681147071
-Pediatrics Phone: 302-478-2613`,
-  },
-];
+gstin
+  - Exactly 15 characters: 2 digits + 5 letters + 4 digits + 1 letter + 1 alphanumeric + "Z" + 1 alphanumeric.
+  - null if absent.
 
-// ─── Safe Rendering & Normalization Helpers ──────────────────────────────────
-function safeText(val: any): string {
-  if (val === null || val === undefined) return '';
-  if (typeof val === 'string') return val;
-  if (typeof val === 'number') return String(val);
-  if (typeof val === 'object') {
-    if (typeof val.number === 'string') return val.number;
-    if (typeof val.phone === 'string') return val.phone;
-    if (typeof val.name === 'string') return val.name;
-    if (typeof val.value === 'string') return val.value;
-    if (typeof val.text === 'string') return val.text;
-    try {
-      return JSON.stringify(val);
-    } catch {
-      return '';
-    }
-  }
-  return String(val);
+PROVIDED SERVICES
+  - List of services or products offered. Usually bulleted or comma-separated.
+  - Short phrases only (1-4 words each).
+  - [] if none listed.
+
+OUTPUT: Raw JSON only. No explanation. No markdown. Start directly with {.
+<|im_end|>
+<|im_start|>user
+OCR Text:
+श्री गणेशाय नमः
+SHAHU MOTORS
+Authorised Dealer – Two Wheelers
+Prop. Ramesh Patil
+M: 9876543210, 9823456789
+Email: shahu.motors@gmail.com
+Opp. ST Stand, Kolhapur – 416001
+GSTIN: 27AABCS1429B1Z5
+
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{
+  "companyName": "SHAHU MOTORS",
+  "tagline": "Authorised Dealer – Two Wheelers",
+  "contactPersons": [{"name": "Ramesh Patil", "role": "Prop."}],
+  "phoneNumbers": ["9876543210", "9823456789"],
+  "emails": ["shahu.motors@gmail.com"],
+  "websites": [],
+  "addresses": ["Opp. ST Stand, Kolhapur – 416001"],
+  "pincode": "416001",
+  "gstin": "27AABCS1429B1Z5",
+  "providedServices": []
 }
+<|im_end|>
+<|im_start|>user
+OCR Text:
+BHARAT SPORTS
+Your Sports Partner
+Vikas Sharma – Owner
+Ph: 8484940121 / 9373129250
+bharatsportsnagpur@gmail.com
+bharatsportsnagpur.com
+Shop No. 12, Sitabuldi, Nagpur 440012
+Football | Cricket | Badminton | Gym Equipment
 
-function normalizeBusinessCard(raw: any): BusinessCard {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      contactPersons: [],
-      phoneNumbers: [],
-      emails: [],
-      websites: [],
-      addressLines: [],
-      rawText: '',
-    };
-  }
-
-  let companyName: string | undefined;
-  if (typeof raw.companyName === 'string') {
-    companyName = raw.companyName.trim();
-  } else if (raw.companyName && typeof raw.companyName === 'object') {
-    companyName = safeText(raw.companyName).trim();
-  }
-
-  const tagline =
-    typeof raw.tagline === 'string' ? raw.tagline.trim() : undefined;
-  const slogan = typeof raw.slogan === 'string' ? raw.slogan.trim() : undefined;
-
-  const contactPersons: { name: string; role?: string }[] = [];
-  const rawPersons = Array.isArray(raw.contactPersons)
-    ? raw.contactPersons
-    : [];
-  for (const p of rawPersons) {
-    if (typeof p === 'string' && p.trim()) {
-      contactPersons.push({ name: p.trim() });
-    } else if (p && typeof p === 'object') {
-      const name = safeText(p.name || p.person || p.contact).trim();
-      const role =
-        safeText(p.role || p.title || p.designation).trim() || undefined;
-      if (name) {
-        contactPersons.push({ name, role });
-      }
-    }
-  }
-
-  const phoneNumbers: string[] = [];
-  const labeledPhones: { number: string; label?: string }[] = [];
-
-  const rawPhones = Array.isArray(raw.phoneNumbers)
-    ? raw.phoneNumbers
-    : Array.isArray(raw.phones)
-      ? raw.phones
-      : typeof raw.phone === 'string'
-        ? [raw.phone]
-        : [];
-
-  for (const item of rawPhones) {
-    if (typeof item === 'string' && item.trim()) {
-      phoneNumbers.push(item.trim());
-    } else if (item && typeof item === 'object') {
-      const num = safeText(item.number || item.phone || item.value).trim();
-      const label = safeText(item.label || item.type).trim() || undefined;
-      if (num) {
-        phoneNumbers.push(num);
-        labeledPhones.push({ number: num, label });
-      }
-    }
-  }
-
-  if (Array.isArray(raw.labeledPhones)) {
-    for (const lp of raw.labeledPhones) {
-      if (lp && typeof lp === 'object') {
-        const num = safeText(lp.number || lp.phone || lp.value).trim();
-        const label = safeText(lp.label || lp.type).trim() || undefined;
-        if (num && !phoneNumbers.includes(num)) {
-          phoneNumbers.push(num);
-          labeledPhones.push({ number: num, label });
-        }
-      }
-    }
-  }
-
-  const emails: string[] = [];
-  const rawEmails = Array.isArray(raw.emails)
-    ? raw.emails
-    : raw.email
-      ? [raw.email]
-      : [];
-  for (const e of rawEmails) {
-    if (typeof e === 'string' && e.trim()) {
-      emails.push(e.trim());
-    } else if (e && typeof e === 'object') {
-      const val = safeText(e.email || e.value).trim();
-      if (val) emails.push(val);
-    }
-  }
-
-  const websites: string[] = [];
-  const rawWebs = Array.isArray(raw.websites)
-    ? raw.websites
-    : raw.website
-      ? [raw.website]
-      : [];
-  for (const w of rawWebs) {
-    if (typeof w === 'string' && w.trim()) {
-      websites.push(w.trim());
-    } else if (w && typeof w === 'object') {
-      const val = safeText(w.website || w.url || w.value).trim();
-      if (val) websites.push(val);
-    }
-  }
-
-  const addressLines: string[] = [];
-  const rawAddresses = Array.isArray(raw.addressLines)
-    ? raw.addressLines
-    : Array.isArray(raw.addresses)
-      ? raw.addresses
-      : typeof raw.address === 'string'
-        ? [raw.address]
-        : [];
-
-  for (const a of rawAddresses) {
-    if (typeof a === 'string' && a.trim()) {
-      addressLines.push(a.trim());
-    } else if (a && typeof a === 'object') {
-      const parts = [
-        a.street,
-        a.city,
-        a.state,
-        a.pincode,
-        a.zip,
-        a.country,
-        a.address,
-        a.line,
-        a.value,
-      ].filter((part) => typeof part === 'string' && part.trim().length > 0);
-      if (parts.length > 0) {
-        addressLines.push(parts.join(', '));
-      } else {
-        const str = Object.values(a)
-          .filter((v) => typeof v === 'string')
-          .join(', ');
-        if (str) addressLines.push(str);
-      }
-    }
-  }
-
-  const pincode = typeof raw.pincode === 'string' ? raw.pincode : undefined;
-  const gstin = typeof raw.gstin === 'string' ? raw.gstin : undefined;
-
-  const providedServices: string[] = [];
-  const rawServices = Array.isArray(raw.providedServices)
-    ? raw.providedServices
-    : Array.isArray(raw.services)
-      ? raw.services
-      : [];
-  for (const s of rawServices) {
-    if (typeof s === 'string' && s.trim()) {
-      providedServices.push(s.trim());
-    }
-  }
-
-  return {
-    companyName,
-    tagline,
-    slogan,
-    contactPersons,
-    phoneNumbers,
-    labeledPhones: labeledPhones.length > 0 ? labeledPhones : undefined,
-    emails,
-    email: emails[0],
-    websites,
-    website: websites[0],
-    addressLines,
-    pincode,
-    gstin,
-    providedServices:
-      providedServices.length > 0 ? providedServices : undefined,
-    rawText: typeof raw.rawText === 'string' ? raw.rawText : '',
-  };
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{
+  "companyName": "BHARAT SPORTS",
+  "tagline": "Your Sports Partner",
+  "contactPersons": [{"name": "Vikas Sharma", "role": "Owner"}],
+  "phoneNumbers": ["8484940121", "9373129250"],
+  "emails": ["bharatsportsnagpur@gmail.com"],
+  "websites": ["bharatsportsnagpur.com"],
+  "addresses": ["Shop No. 12, Sitabuldi, Nagpur 440012"],
+  "pincode": "440012",
+  "gstin": null,
+  "providedServices": ["Football", "Cricket", "Badminton", "Gym Equipment"]
 }
+<|im_end|>
+<|im_start|>user
+OCR Text:
+{{OCR_TEXT}}
+
+Return JSON:
+<|im_end|>
+<|im_start|>assistant
+{`;
 
 /**
- * Robust JSON extractor and repairer for on-device Small Language Models.
- * Handles markdown wrapping, unclosed quotes, and trailing unclosed brackets.
+ * Apply the user's custom or default prompt template to the raw OCR text.
+ * Replaces {{OCR_TEXT}} or ${rawText} if present, or appends the OCR text cleanly.
  */
-function tryExtractAndParseJson(rawResponse: string): any | null {
-  if (!rawResponse) return null;
-  let text = rawResponse.trim();
-
-  // Strip markdown code fences if present (e.g. ```json ... ```)
-  text = text
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .trim();
-
-  // Ensure text starts at the first '{'
-  const firstBrace = text.indexOf('{');
-  if (firstBrace === -1) {
-    text = '{' + text;
-  } else if (firstBrace > 0) {
-    text = text.substring(firstBrace);
+function applyUserPrompt(template: string, ocrText: string): string {
+  if (template.includes('{{OCR_TEXT}}')) {
+    return template.replace('{{OCR_TEXT}}', ocrText);
   }
-
-  // First quick attempt: if closing brace exists, try parsing up to last '}'
-  const lastBrace = text.lastIndexOf('}');
-  if (lastBrace !== -1) {
-    try {
-      return JSON.parse(text.substring(0, lastBrace + 1));
-    } catch {
-      // If parsing fails (e.g. trailing comma or unclosed string), proceed to repair
-    }
+  if (template.includes('${rawText}')) {
+    return template.replace('${rawText}', ocrText);
   }
-
-  // Resilient repair for truncated outputs (e.g. unexpected end of input)
-  try {
-    let repaired = text;
-
-    // Remove any trailing commas before brackets/braces
-    repaired = repaired.replace(/,\s*([}\]])/g, '$1');
-
-    // Balance unclosed quotes
-    let inString = false;
-    for (let i = 0; i < repaired.length; i++) {
-      if (repaired[i] === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
-        inString = !inString;
-      }
-    }
-    if (inString) {
-      repaired += '"';
-    }
-
-    // Balance open brackets and braces
-    let openBraces = 0;
-    let openBrackets = 0;
-    inString = false;
-    for (let i = 0; i < repaired.length; i++) {
-      const char = repaired[i];
-      if (char === '"' && (i === 0 || repaired[i - 1] !== '\\')) {
-        inString = !inString;
-      }
-      if (!inString) {
-        if (char === '{') openBraces++;
-        if (char === '}') openBraces--;
-        if (char === '[') openBrackets++;
-        if (char === ']') openBrackets--;
-      }
-    }
-
-    while (openBrackets > 0) {
-      repaired += ']';
-      openBrackets--;
-    }
-    while (openBraces > 0) {
-      repaired += '}';
-      openBraces--;
-    }
-
-    return JSON.parse(repaired);
-  } catch {
-    return null;
-  }
+  return `${template.trim()}\n\nOCR Text:\n${ocrText}\n\nReturn JSON:\n<|im_end|>\n<|im_start|>assistant\n{`;
 }
 
-export default function App() {
-  // Navigation & UI Toggles
-  const [showLlmManager, setShowLlmManager] = useState(false);
-  const [showRawOcr, setShowRawOcr] = useState(false);
-  const [forceViewType, setForceViewType] = useState<'card' | 'bill' | null>(
-    null
-  );
+// ─── Every Customizable LLM Setting for Selected Universal Indic Model ───────
+export interface LlmSettings {
+  // 1. Sampling & Creativity
+  temperature: number;
+  top_p: number;
+  top_k: number;
+  min_p: number;
+  typical_p: number;
+  seed: number;
 
-  // Scanning State
-  const [pageLimit, setPageLimit] = useState<number>(1);
-  const [scannedImageUri, setScannedImageUri] = useState<string | null>(null);
-  const [scannedImageUris, setScannedImageUris] = useState<string[]>([]);
-  const [selectedPageIndex, setSelectedPageIndex] = useState<number>(0);
+  // 2. Output Limits & Penalties
+  n_predict: number;
+  penalty_repeat: number;
+  penalty_freq: number;
+  penalty_present: number;
+  penalty_last_n: number;
+  stopSequences: string;
+
+  // 3. Structured Grammar & Thinking
+  enable_grammar: boolean;
+  grammar_text: string;
+  enable_thinking: boolean;
+  thinking_budget_tokens: number;
+
+  // 4. Hardware & Memory Allocation (initLlama)
+  n_threads: number;
+  n_ctx: number;
+  n_batch: number;
+  n_ubatch: number;
+  use_mlock: boolean;
+  use_mmap: boolean;
+  flash_attn: boolean;
+  cache_type_k: 'f16' | 'q8_0' | 'q4_0';
+  cache_type_v: 'f16' | 'q8_0' | 'q4_0';
+  cpu_mask: string;
+  no_extra_bufts: boolean;
+}
+
+export const DEFAULT_STANDARD_JSON_GRAMMAR = `root ::= object
+object ::= "{" ws (entry ("," ws entry)*)? ws "}"
+entry ::= string ":" ws value
+value ::= string | number | object | array | "true" | "false" | "null"
+array ::= "[" ws (value ("," ws value)*)? ws "]"
+string ::= "\\"" ([^"\\\\] | "\\\\" ["\\\\/bfnrt])* "\\""
+number ::= "-"? [0-9]+ ("." [0-9]+)?
+ws ::= [ \\t\\n\\r]*`;
+
+export const DEFAULT_LLM_SETTINGS: LlmSettings = {
+  temperature: 0.1,
+  top_p: 0.95,
+  top_k: 40,
+  min_p: 0.05,
+  typical_p: 1.0,
+  seed: -1,
+
+  n_predict: 400,
+  penalty_repeat: 1.0,
+  penalty_freq: 0.0,
+  penalty_present: 0.0,
+  penalty_last_n: 64,
+  stopSequences: '<|im_end|>, </s>, <|endoftext|>',
+
+  enable_grammar: false,
+  grammar_text: DEFAULT_STANDARD_JSON_GRAMMAR,
+  enable_thinking: false,
+  thinking_budget_tokens: 0,
+
+  n_threads: 4,
+  n_ctx: 1024,
+  n_batch: 256,
+  n_ubatch: 64,
+  use_mlock: false,
+  use_mmap: true,
+  flash_attn: false,
+  cache_type_k: 'f16',
+  cache_type_v: 'f16',
+  cpu_mask: '',
+  no_extra_bufts: false,
+};
+
+const LLM_SETTINGS_STORAGE_KEY = '@cardlens_llm_settings_v4';
+
+export default function App() {
+  // OCR & Image State
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [scannedImageUris, setScannedImageUris] = useState<string[]>([]);
+  const [rawOcrResult, setRawOcrResult] = useState<RawOcrResult | null>(null);
+  const [ocrDurationMs, setOcrDurationMs] = useState<number | null>(null);
 
-  // Extraction Results
-  const [detectedType, setDetectedType] = useState<'card' | 'bill' | null>(
+  // LLM Inference State
+  const [rawLlmOutput, setRawLlmOutput] = useState<string | null>(null);
+  const [llmDurationMs, setLlmDurationMs] = useState<number | null>(null);
+  const [isLlmLoading, setIsLlmLoading] = useState(false);
+
+  // User Prompt State & Persistence
+  const [userPrompt, setUserPrompt] = useState<string>(DEFAULT_PROMPT_TEMPLATE);
+  const [promptDraft, setPromptDraft] = useState<string>(
+    DEFAULT_PROMPT_TEMPLATE
+  );
+  const [showPromptEditor, setShowPromptEditor] = useState<boolean>(false);
+  const [isCustomPrompt, setIsCustomPrompt] = useState<boolean>(false);
+
+  // Model & Inference Settings State & Persistence
+  const [llmSettings, setLlmSettings] =
+    useState<LlmSettings>(DEFAULT_LLM_SETTINGS);
+  const [tempSettings, setTempSettings] =
+    useState<LlmSettings>(DEFAULT_LLM_SETTINGS);
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [activeEngineInfo, setActiveEngineInfo] = useState<{
+    engineName: string;
+    badgeText: string;
+    details: string;
+    badgeType: 'green' | 'indigo' | 'amber';
+  } | null>(null);
+
+  // Load persisted prompt and settings from AsyncStorage on mount
+  useEffect(() => {
+    AsyncStorage.getItem(PROMPT_STORAGE_KEY)
+      .then((saved) => {
+        if (saved && saved.trim()) {
+          setUserPrompt(saved);
+          setPromptDraft(saved);
+          setIsCustomPrompt(saved.trim() !== DEFAULT_PROMPT_TEMPLATE.trim());
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load saved prompt', err);
+      });
+
+    AsyncStorage.getItem(LLM_SETTINGS_STORAGE_KEY)
+      .then((saved) => {
+        if (saved && saved.trim()) {
+          try {
+            const parsed = JSON.parse(saved);
+            const merged: LlmSettings = { ...DEFAULT_LLM_SETTINGS, ...parsed };
+            setLlmSettings(merged);
+            setTempSettings(merged);
+          } catch {}
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load saved settings', err);
+      });
+  }, []);
+
+  const handleSavePrompt = async () => {
+    try {
+      await AsyncStorage.setItem(PROMPT_STORAGE_KEY, promptDraft);
+      setUserPrompt(promptDraft);
+      setIsCustomPrompt(promptDraft.trim() !== DEFAULT_PROMPT_TEMPLATE.trim());
+      setShowPromptEditor(false);
+      setStatusMessage(
+        '💾 Custom prompt saved! LLM will strictly use this prompt.'
+      );
+    } catch (e: any) {
+      setError(`Failed to save prompt: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleResetPrompt = async () => {
+    try {
+      await AsyncStorage.removeItem(PROMPT_STORAGE_KEY);
+      setUserPrompt(DEFAULT_PROMPT_TEMPLATE);
+      setPromptDraft(DEFAULT_PROMPT_TEMPLATE);
+      setIsCustomPrompt(false);
+      setStatusMessage('🔄 Restored default prompt template.');
+    } catch (e: any) {
+      setError(`Failed to reset prompt: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    try {
+      await AsyncStorage.setItem(
+        LLM_SETTINGS_STORAGE_KEY,
+        JSON.stringify(tempSettings)
+      );
+      const hardwareChanged =
+        tempSettings.n_threads !== llmSettings.n_threads ||
+        tempSettings.n_ctx !== llmSettings.n_ctx ||
+        tempSettings.n_batch !== llmSettings.n_batch ||
+        tempSettings.n_ubatch !== llmSettings.n_ubatch ||
+        tempSettings.use_mlock !== llmSettings.use_mlock ||
+        tempSettings.use_mmap !== llmSettings.use_mmap ||
+        tempSettings.flash_attn !== llmSettings.flash_attn ||
+        tempSettings.cache_type_k !== llmSettings.cache_type_k ||
+        tempSettings.cache_type_v !== llmSettings.cache_type_v ||
+        tempSettings.no_extra_bufts !== llmSettings.no_extra_bufts ||
+        tempSettings.cpu_mask !== llmSettings.cpu_mask;
+
+      setLlmSettings(tempSettings);
+      setShowSettingsModal(false);
+
+      if (hardwareChanged && isModelActive) {
+        setStatusMessage(
+          '🔄 Hardware settings updated. Reloading model into RAM with new configuration...'
+        );
+        await handleLoadModel(tempSettings);
+      } else {
+        setStatusMessage('⚙️ Model & inference settings saved!');
+      }
+    } catch (e: any) {
+      setError(`Failed to save settings: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleResetSettings = async () => {
+    try {
+      await AsyncStorage.removeItem(LLM_SETTINGS_STORAGE_KEY);
+      setTempSettings(DEFAULT_LLM_SETTINGS);
+      setLlmSettings(DEFAULT_LLM_SETTINGS);
+      setStatusMessage('🔄 Restored default model & inference settings.');
+    } catch (e: any) {
+      setError(`Failed to reset settings: ${e.message || String(e)}`);
+    }
+  };
+
+  // Clipboard Copied State
+  const [copiedSection, setCopiedSection] = useState<'ocr' | 'llm' | null>(
     null
   );
-  const [businessCard, setBusinessCard] = useState<BusinessCard | null>(null);
-  const [billDocument, setBillDocument] = useState<BillDocument | null>(null);
-  const [ocrResult, setOcrResult] = useState<RawOcrResult | null>(null);
-  const [thinkingLoading, setThinkingLoading] = useState(false);
 
-  // SLM / llama.rn State
-  const [selectedModelIdx, setSelectedModelIdx] = useState<number>(0);
+  // Fullscreen Modal State
+  const [fullscreenModal, setFullscreenModal] = useState<{
+    title: string;
+    subtitle: string;
+    badge: string;
+    badgeType: 'green' | 'indigo';
+    content: string;
+    type: 'ocr' | 'llm';
+  } | null>(null);
+
+  // SLM / GGUF Download & Manager State
+  const [showLlmManager, setShowLlmManager] = useState(false);
   const [downloadedModels, setDownloadedModels] = useState<
     Record<string, string>
   >({});
@@ -568,323 +445,274 @@ export default function App() {
 
   const llamaContextRef = useRef<LlamaContext | null>(null);
 
-  // Clear all current results
-  const clearResults = () => {
-    setDetectedType(null);
-    setForceViewType(null);
-    setBusinessCard(null);
-    setBillDocument(null);
-    setOcrResult(null);
-    setSelectedPageIndex(0);
-    setError(null);
+  // Universal Indic Model is the sole model
+  const universalModel = AVAILABLE_SLM_MODELS[0]!;
+  const isModelDownloaded = !!downloadedModels[universalModel.id];
+  const isModelActive = activeModelId === universalModel.id;
+  const isModelDownloading = downloadingModelId === universalModel.id;
+
+  // Clear current flow
+  const handleClear = () => {
+    setScannedImageUris([]);
+    setRawOcrResult(null);
+    setOcrDurationMs(null);
+    setRawLlmOutput(null);
+    setLlmDurationMs(null);
     setStatusMessage(null);
-    setHybridResult(null);
-    setIsHybridActive(false);
-    setShowResidualModal(false);
+    setError(null);
+    setCopiedSection(null);
+    setFullscreenModal(null);
   };
 
-  // Build the structured extraction prompt for SLM
-  const buildExtractionPrompt = (rawText: string) => {
-    return `<|im_start|>system
-You are an expert business card extractor. Extract structured contact fields from the OCR text into valid JSON only. Output raw JSON directly without markdown formatting.
-Crucial Extraction Rules:
-1. Multi-branch Outlets: If the card lists multiple store branches (e.g. separated by '|' and phone numbers), extract each branch address into the 'addresses' array and separate each branch phone number into 'phoneNumbers'.
-2. Brand vs Persons: Store brand names (e.g. "Cakes Inn") belong in "companyName". Do NOT extract building or landmark names (e.g. apartments, complexes, chambers, plazas) as contact persons. If no personal name is present on a brand/retail card, set "contactPersons": [].
-3. Strip embedded phone numbers from the address strings.
-<|im_end|>
-<|im_start|>user
-OCR Text:
-${rawText}
-
-Return this JSON format:
-{
-  "companyName": "Company or null",
-  "tagline": "Tagline or null",
-  "contactPersons": [{"name": "Name", "role": "Title"}],
-  "phoneNumbers": ["Phone"],
-  "emails": ["Email"],
-  "websites": ["Website"],
-  "addresses": ["Address"],
-  "pincode": "PIN or null",
-  "gstin": "GSTIN or null"
-}
-<|im_end|>
-<|im_start|>assistant
-{`;
+  // Copy to clipboard helper
+  const handleCopyToClipboard = (text: string, section: 'ocr' | 'llm') => {
+    try {
+      Clipboard.setString(text);
+      setCopiedSection(section);
+      setTimeout(() => setCopiedSection(null), 2000);
+    } catch (e: any) {
+      setError(`Clipboard error: ${e.message || String(e)}`);
+    }
   };
 
-  // Launch live camera scanner or gallery import
-  const handleLaunchScanner = async () => {
-    clearResults();
+  // ─── Stage 1: Google ML Kit Extraction Handlers ────────────────────────────
+
+  // Scan with Camera (Multi-page allowed up to 10 pages)
+  const handleScanWithCamera = async () => {
+    handleClear();
     setLoading(true);
-    setStatusMessage('📷 Opening CameraX Document Scanner...');
+    setStatusMessage('📷 Opening CameraX Document Scanner (Multi-Page)...');
 
+    const t0 = Date.now();
     try {
       const scan: ScanResult = await startScanner({
-        pageLimit: pageLimit,
+        pageLimit: 10,
         scannerMode: 'FULL',
         allowGalleryImport: true,
         autoOcr: false,
         script: 'auto',
       });
 
-      setScannedImageUri(scan.imageUri);
       const allUris =
         scan.imageUris && scan.imageUris.length > 0
           ? scan.imageUris
           : scan.imageUri
             ? [scan.imageUri]
             : [];
-      setScannedImageUris(allUris);
-      setSelectedPageIndex(0);
-      if (scan.ocrResult) setOcrResult(scan.ocrResult);
 
-      const targetToScan = allUris.length > 1 ? allUris : scan.imageUri;
-
-      if (scan.imageUri) {
-        setStatusMessage('⚡ Auto-detecting document type (Card vs Bill)...');
-        const res: DocumentScanResult = await scanDocument(targetToScan);
-        setDetectedType(res.type);
-
-        if (res.type === 'card') {
-          const card = normalizeBusinessCard(res.data as BusinessCard);
-          setBusinessCard(card);
-          setStatusMessage('✅ Auto-Detected: Business Card');
-        } else {
-          const bill = res.data as BillDocument;
-          setBillDocument(bill);
-          setStatusMessage(
-            `✅ Auto-Detected: Bill / Invoice (${bill.lineItems?.length || 0} line items)`
-          );
-        }
+      if (allUris.length === 0) {
+        throw new Error('No image captured');
       }
+
+      setScannedImageUris(allUris);
+
+      setStatusMessage(
+        allUris.length > 1
+          ? `⚡ Running Google ML Kit OCR on ${allUris.length} pages...`
+          : '⚡ Running Google ML Kit OCR on captured card...'
+      );
+
+      const ocrResults = await Promise.all(
+        allUris.map((uri) => recognizeText(uri, 'auto'))
+      );
+
+      const combinedRawText =
+        ocrResults.length === 1
+          ? ocrResults[0]!.rawText
+          : ocrResults
+              .map((r, i) => `--- Page ${i + 1} ---\n${r.rawText}`)
+              .join('\n\n');
+
+      const combinedBlocks = ocrResults.flatMap((r) => r.blocks || []);
+
+      const dur = Date.now() - t0;
+      setRawOcrResult({
+        blocks: combinedBlocks,
+        rawText: combinedRawText,
+      });
+      setOcrDurationMs(dur);
+      setStatusMessage(`✅ Extracted raw OCR with Google ML Kit in ${dur}ms!`);
     } catch (e: any) {
       if (e.code === 'CARDLENS_SCAN_CANCELED') {
         setStatusMessage('Scan cancelled by user.');
       } else {
-        setError(e.message || 'Scan failed');
+        setError(e.message || 'ML Kit scan failed');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  // Open system storage file picker for Images or Multi-page PDFs
+  // Pick Any Document or Image (PDFs, multi-page PDFs, images)
   const handlePickDocument = async () => {
-    clearResults();
+    handleClear();
     setLoading(true);
-    setStatusMessage('📂 Opening system file picker (Images & PDFs)...');
+    setStatusMessage('📂 Opening file picker for Document (PDF) or Image...');
 
+    const t0 = Date.now();
     try {
       const pick: ScanResult = await pickDocument({
         allowPdf: true,
         autoOcr: false,
+        script: 'auto',
       });
 
-      setScannedImageUri(pick.imageUri);
       const allUris =
         pick.imageUris && pick.imageUris.length > 0
           ? pick.imageUris
           : pick.imageUri
             ? [pick.imageUri]
             : [];
-      setScannedImageUris(allUris);
-      setSelectedPageIndex(0);
 
-      const targetToScan = allUris.length > 1 ? allUris : pick.imageUri;
-
-      if (pick.imageUri) {
-        const isMultiPage = allUris.length > 1;
-        setStatusMessage(
-          isMultiPage
-            ? `📄 Imported ${allUris.length} pages from PDF! Auto-analyzing...`
-            : '⚡ Auto-analyzing imported file...'
-        );
-        const res: DocumentScanResult = await scanDocument(targetToScan);
-        setDetectedType(res.type);
-
-        if (res.type === 'card') {
-          const card = normalizeBusinessCard(res.data as BusinessCard);
-          setBusinessCard(card);
-          setStatusMessage(
-            `✅ Auto-Detected: Business Card (${card.companyName || 'Card'}${isMultiPage ? ` • ${allUris.length} pages` : ''})`
-          );
-        } else {
-          const bill = res.data as BillDocument;
-          setBillDocument(bill);
-          setStatusMessage(
-            `✅ Auto-Detected: Bill / Invoice (${bill.lineItems?.length || 0} items)`
-          );
-        }
+      if (allUris.length === 0) {
+        throw new Error('No document or image selected');
       }
+
+      setScannedImageUris(allUris);
+
+      setStatusMessage(
+        allUris.length > 1
+          ? `⚡ Running Google ML Kit OCR on ${allUris.length} pages...`
+          : '⚡ Running Google ML Kit OCR on selected document...'
+      );
+
+      const ocrResults = await Promise.all(
+        allUris.map((uri) => recognizeText(uri, 'auto'))
+      );
+
+      const combinedRawText =
+        ocrResults.length === 1
+          ? ocrResults[0]!.rawText
+          : ocrResults
+              .map((r, i) => `--- Page ${i + 1} ---\n${r.rawText}`)
+              .join('\n\n');
+
+      const combinedBlocks = ocrResults.flatMap((r) => r.blocks || []);
+
+      const dur = Date.now() - t0;
+      setRawOcrResult({
+        blocks: combinedBlocks,
+        rawText: combinedRawText,
+      });
+      setOcrDurationMs(dur);
+      setStatusMessage(`✅ Extracted raw OCR with Google ML Kit in ${dur}ms!`);
     } catch (e: any) {
       if (e.code === 'CARDLENS_PICK_CANCELED') {
-        setStatusMessage('File selection cancelled by user.');
+        setStatusMessage('Selection cancelled by user.');
       } else {
-        setError(e.message || 'File picking failed');
+        setError(e.message || 'Document selection failed');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  // Test realistic samples
-  const handleLoadSample = async (sample: (typeof SAMPLE_DOCUMENTS)[0]) => {
-    clearResults();
-    setLoading(true);
-    setStatusMessage(`⚡ Auto-classifying "${sample.title}"...`);
-
-    try {
-      setOcrResult({ blocks: [], rawText: sample.text });
-
-      if (sample.type === 'bill') {
-        // Dynamically parse sample as Bill using semantic bill extractor
-        setDetectedType('bill');
-        const parsed = parseFallbackLocalBill(sample.text);
-        setBillDocument(parsed);
-        setStatusMessage(
-          `✅ Auto-Detected: ${parsed.documentType || 'Bill'} (${parsed.issuerName || 'Vendor'})`
-        );
-      } else {
-        // Parse sample as Card using Native Thinking / Semantic Reasoner
-        console.log(
-          '[CardLensTest] Starting sample card refinement:',
-          sample.title
-        );
-        setDetectedType('card');
-        try {
-          const refined = await refineCardWithThinkingModule(sample.text);
-          console.log(
-            '[CardLensTest] Refined successfully:',
-            JSON.stringify(refined)
-          );
-          let card: BusinessCard = normalizeBusinessCard(refined);
-          const det = extractDeterministicUniversal(sample.text);
-          setHybridResult(det);
-          card = extractHybridUniversalCard(sample.text, card);
-          setIsHybridActive(true);
-          console.log('[CardLensTest] Normalized card:', JSON.stringify(card));
-          setBusinessCard(card);
-          setStatusMessage(
-            `✅ Auto-Detected: Business Card (${card.companyName || 'Card'})`
-          );
-        } catch (err: any) {
-          console.error('[CardLensTest] Refinement error:', err);
-          setError(err.message || String(err));
-        }
-      }
-    } catch (e: any) {
-      console.error('[CardLensTest] Top error:', e);
-      setError(e.message || 'Failed to process sample');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Refine Business Card with On-Device LLM or Semantic Reasoner
-  const handleRefineWithThinking = async () => {
-    if (!businessCard && !ocrResult) return;
-    setThinkingLoading(true);
+  // ─── Stage 2: Send Untouched Raw OCR directly to Efficient LLM ─────────────
+  const handleSendToEfficientLlm = async () => {
+    if (!rawOcrResult?.rawText?.trim()) return;
+    setIsLlmLoading(true);
+    setRawLlmOutput(null);
     setError(null);
+
+    const rawText = rawOcrResult.rawText;
+    const t0 = Date.now();
+
     try {
       const ctx = llamaContextRef.current;
-      const activeModel = AVAILABLE_SLM_MODELS.find(
-        (m) => m.id === activeModelId
-      );
 
-      // Prioritize original OCR raw text so no multi-branch lines or phones are lost
-      const rawText =
-        ocrResult?.rawText ||
-        businessCard?.rawText ||
-        [
-          businessCard?.companyName,
-          businessCard?.tagline,
-          businessCard?.contactPersons
-            ?.map((p) => `${p.name} ${p.role || ''}`)
-            .join(' '),
-          businessCard?.addressLines?.join('\n'),
-          businessCard?.phoneNumbers?.join(' '),
-          businessCard?.emails?.join(' '),
-          businessCard?.websites?.join(' '),
-        ]
-          .filter(Boolean)
-          .join('\n');
-
-      if (ctx) {
-        setStatusMessage(
-          `🧠 Running Local GGUF (${activeModel?.name || 'llama.rn'})...`
+      if (!ctx) {
+        setError(
+          `Please load ${universalModel.name} into RAM first (tap the Universal Indic pill at the top, then tap "Load into RAM").`
         );
-        try {
-          const prompt = buildExtractionPrompt(rawText);
-          const result = await ctx.completion({
-            prompt,
-            n_predict: 250,
-            temperature: 0.1,
-            grammar: BUSINESS_CARD_GBNF_GRAMMAR,
-            stop: ['<|im_end|>', '</s>', '<|endoftext|>'],
-          });
-
-          const parsed = tryExtractAndParseJson(result.text);
-          if (parsed && typeof parsed === 'object') {
-            let card = normalizeBusinessCard(parsed);
-            const det = extractDeterministicUniversal(rawText);
-            setHybridResult(det);
-            card = extractHybridUniversalCard(rawText, card);
-            setIsHybridActive(true);
-            setBusinessCard(card);
-            setStatusMessage(
-              `✨ Card refined by ${activeModel?.name || 'llama.rn GGUF'}!`
-            );
-            return;
-          }
-        } catch (llmErr: any) {
-          console.warn(
-            'Local LLM inference encountered error, falling back to Semantic Reasoner:',
-            llmErr
-          );
-        }
+        setShowLlmManager(true);
+        return;
       }
 
-      // Fallback: Deterministic Semantic Thinking Reasoner
-      setStatusMessage('⚡ Running Universal Semantic Thinking Engine...');
-      const refined = await refineCardWithThinkingModule(rawText);
-      let card = normalizeBusinessCard(refined);
-      const det = extractDeterministicUniversal(rawText);
-      setHybridResult(det);
-      card = extractHybridUniversalCard(rawText, card);
-      setIsHybridActive(true);
-      setBusinessCard(card);
       setStatusMessage(
-        '✨ Card refined by Universal Semantic Thinking Reasoner!'
+        `🧠 Running ${universalModel.name} (${llmSettings.n_threads} Threads, T=${llmSettings.temperature})...`
       );
-    } catch (e: any) {
-      setError(e.message || 'Refinement failed');
+      // Strictly use the user-feeded prompt template
+      const prompt = applyUserPrompt(userPrompt, rawText);
+
+      const stopTokens = llmSettings.stopSequences
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const completionParams: any = {
+        prompt,
+        n_predict: llmSettings.n_predict,
+        temperature: llmSettings.temperature,
+        top_p: llmSettings.top_p,
+        top_k: llmSettings.top_k,
+        min_p: llmSettings.min_p,
+        typical_p: llmSettings.typical_p,
+        penalty_repeat: llmSettings.penalty_repeat,
+        penalty_freq: llmSettings.penalty_freq,
+        penalty_present: llmSettings.penalty_present,
+        penalty_last_n: llmSettings.penalty_last_n,
+        stop:
+          stopTokens.length > 0
+            ? stopTokens
+            : ['<|im_end|>', '</s>', '<|endoftext|>'],
+        enable_thinking: llmSettings.enable_thinking,
+      };
+
+      if (llmSettings.seed >= 0) {
+        completionParams.seed = llmSettings.seed;
+      }
+      if (llmSettings.thinking_budget_tokens > 0) {
+        completionParams.thinking_budget_tokens =
+          llmSettings.thinking_budget_tokens;
+      }
+      if (llmSettings.enable_grammar && llmSettings.grammar_text.trim()) {
+        completionParams.grammar = llmSettings.grammar_text.trim();
+      }
+
+      const result = await ctx.completion(completionParams);
+
+      const dur = Date.now() - t0;
+      setLlmDurationMs(dur);
+      setActiveEngineInfo({
+        engineName: universalModel.name,
+        badgeText: `🤖 ${universalModel.name}`,
+        details: `${llmSettings.n_threads} Threads • T=${llmSettings.temperature} • max=${llmSettings.n_predict}${
+          llmSettings.enable_grammar ? ' • GBNF' : ''
+        }${llmSettings.seed >= 0 ? ` • Seed=${llmSettings.seed}` : ''}`,
+        badgeType: 'indigo',
+      });
+      const trimmed = result.text.trim();
+      const fullOutput = trimmed.startsWith('{') ? trimmed : `{\n  ${trimmed}`;
+      setRawLlmOutput(fullOutput);
+      setStatusMessage(
+        `✨ Raw LLM output generated using ${isCustomPrompt ? 'user-feeded' : 'configured'} prompt in ${dur}ms!`
+      );
+    } catch (err: any) {
+      setError(err.message || 'LLM extraction failed');
     } finally {
-      setThinkingLoading(false);
+      setIsLlmLoading(false);
     }
   };
 
-  // Download GGUF Model with chunked streaming progress
-  const handleDownloadModel = async (modelIdx: number) => {
-    const model = AVAILABLE_SLM_MODELS[modelIdx]!;
-    setSelectedModelIdx(modelIdx);
-    setDownloadingModelId(model.id);
+  // ─── GGUF Model Management (Universal Indic Model Only) ───────────────────
+  const handleDownloadModel = async () => {
+    setDownloadingModelId(universalModel.id);
     setError(null);
     setDownloadProgress({
-      fileName: model.filename,
+      fileName: universalModel.filename,
       downloadedBytes: 0,
-      totalBytes: model.sizeMB * 1024 * 1024,
+      totalBytes: universalModel.sizeMB * 1024 * 1024,
       percentage: 0,
     });
-    setStatusMessage(`Downloading ${model.name}...`);
+    setStatusMessage(`Downloading ${universalModel.name}...`);
     try {
       const localPath = await downloadThinkingModel(
-        model.url,
-        model.filename,
+        universalModel.url,
+        universalModel.filename,
         (prog) => setDownloadProgress(prog)
       );
-      setDownloadedModels((prev) => ({ ...prev, [model.id]: localPath }));
-      setStatusMessage(`✅ Downloaded: ${model.name}`);
+      setDownloadedModels({ [universalModel.id]: localPath });
+      setStatusMessage(`✅ Downloaded: ${universalModel.name}`);
     } catch (e: any) {
       setError(e.message || 'Model download failed');
     } finally {
@@ -893,40 +721,57 @@ Return this JSON format:
     }
   };
 
-  // Load Model into RAM via llama.rn
-  const handleLoadModel = async (modelIdx: number) => {
-    const model = AVAILABLE_SLM_MODELS[modelIdx]!;
-    setSelectedModelIdx(modelIdx);
-    const targetPath = downloadedModels[model.id];
+  const handleLoadModel = async (overrideSettings?: LlmSettings) => {
+    const settings = overrideSettings || llmSettings;
+    const targetPath = downloadedModels[universalModel.id];
+
     if (!targetPath) {
-      setError('Please download this model first.');
+      setError(`Model file for ${universalModel.name} not found on device.`);
       return;
     }
+
     setSlmLoading(true);
-    setStatusMessage(`Loading ${model.name} into RAM via llama.rn...`);
+    setStatusMessage(
+      `Loading ${universalModel.name} into RAM via llama.rn (${settings.n_threads}T, ${settings.n_ctx} ctx)...`
+    );
     try {
       if (llamaContextRef.current) {
         await llamaContextRef.current.release();
         llamaContextRef.current = null;
-        setActiveModelId(null);
       }
+
       const ctx = await initLlama({
-        model: `file://${targetPath}`,
-        n_ctx: 1024,
-        n_threads: 4,
+        model: targetPath,
+        use_mlock: settings.use_mlock,
+        use_mmap: settings.use_mmap,
+        n_ctx: settings.n_ctx,
+        n_threads: settings.n_threads,
+        n_batch: settings.n_batch,
+        n_ubatch: settings.n_ubatch,
+        flash_attn: settings.flash_attn,
+        cache_type_k: settings.cache_type_k,
+        cache_type_v: settings.cache_type_v,
+        no_extra_bufts: settings.no_extra_bufts,
+        ...(settings.cpu_mask.trim()
+          ? { cpu_mask: settings.cpu_mask.trim() }
+          : {}),
       });
       llamaContextRef.current = ctx;
-      setActiveModelId(model.id);
-      setStatusMessage(`🟢 ${model.name} is Active & Ready in RAM!`);
+      setActiveModelId(universalModel.id);
+      setStatusMessage(
+        `🟢 Active in RAM: ${universalModel.name}! (${settings.n_threads} threads, ${settings.n_ctx} ctx)`
+      );
+      setShowLlmManager(false);
     } catch (e: any) {
-      setError(e.message || 'Failed to load GGUF model');
+      setError(
+        `Failed to load ${universalModel.name}: ${e.message || String(e)}`
+      );
       setActiveModelId(null);
     } finally {
       setSlmLoading(false);
     }
   };
 
-  // Unload Model from RAM
   const handleUnloadModel = async () => {
     try {
       if (llamaContextRef.current) {
@@ -940,855 +785,1989 @@ Return this JSON format:
     }
   };
 
-  const selectedModel = AVAILABLE_SLM_MODELS[selectedModelIdx]!;
-  const isSelectedDownloaded = !!downloadedModels[selectedModel.id];
-  const isSelectedActive = activeModelId === selectedModel.id;
-  const isSelectedDownloading = downloadingModelId === selectedModel.id;
-  const activeModelObj = AVAILABLE_SLM_MODELS.find(
-    (m) => m.id === activeModelId
-  );
-
-  // Resolved document type (allows user manual override)
-  const currentViewType = forceViewType || detectedType;
-
   return (
     <View style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B0D17" />
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="transparent"
+        translucent={Platform.OS === 'android'}
+      />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Top Header */}
+        {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerRow}>
             <View>
-              <Text style={styles.appTitle}>CardLens Studio</Text>
+              <Text style={styles.appTitle}>CardLens</Text>
               <Text style={styles.appSubtitle}>
-                Auto-Detecting Card & Bill Scanner
+                ML Kit Total Raw OCR ➔ Universal Indic LLM
               </Text>
             </View>
 
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              {/* On-Device LLM Status Toggle Pill (Qwen2.5-1.5B Universal) */}
-              <TouchableOpacity
-                style={[
-                  styles.llmHeaderPill,
-                  activeModelId ? styles.llmHeaderPillActive : null,
-                ]}
-                onPress={() => setShowLlmManager(!showLlmManager)}
-              >
-                <Text style={styles.llmHeaderPillDot}>
-                  {activeModelId ? '🟢' : '🧠'}
-                </Text>
-                <Text style={styles.llmHeaderPillText}>
-                  {activeModelObj
-                    ? activeModelObj.name
-                        .replace('Universal Indic Edition', '')
-                        .trim()
-                    : 'Qwen 1.5B (Trained)'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+            {/* Universal Indic Model Pill Button */}
+            <TouchableOpacity
+              style={[
+                styles.llmHeaderPill,
+                isModelActive ? styles.llmHeaderPillActive : null,
+              ]}
+              onPress={() => setShowLlmManager(!showLlmManager)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.llmHeaderPillDot}>
+                {isModelActive ? '🟢' : '🧠'}
+              </Text>
+              <Text style={styles.llmHeaderPillText}>
+                {isModelActive ? 'Universal Indic (Active)' : 'Universal Indic'}
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* Dynamic On-Device LLM (GGUF) Manager (Collapsible) */}
+        {/* Model Manager Dropdown (Collapsible) */}
         {showLlmManager && (
           <View style={styles.llmManagerCard}>
             <View style={styles.llmManagerHeader}>
               <View>
                 <Text style={styles.llmManagerTitle}>
-                  🧠 On-Device SLM Intelligence
+                  🧠 Universal Indic Module
                 </Text>
                 <Text style={styles.llmManagerSubtitle}>
-                  100% Free • Offline llama.rn GGUF • Zero Tokens • Zero API
+                  Offline on-device inference via llama.rn
                 </Text>
               </View>
               <TouchableOpacity
                 onPress={() => setShowLlmManager(false)}
                 style={styles.llmCloseBtn}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={styles.llmCloseBtnText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            {/* 3 Real GGUF Model Options */}
-            {AVAILABLE_SLM_MODELS.map((model, idx) => {
-              const isDownloaded = !!downloadedModels[model.id];
-              const isActive = activeModelId === model.id;
-              const isThisDownloading = downloadingModelId === model.id;
-              const isSelected = selectedModelIdx === idx;
-
-              return (
-                <TouchableOpacity
-                  key={model.id}
-                  style={[
-                    styles.modelCard,
-                    isSelected && styles.modelCardSelected,
-                    isActive && styles.modelCardActive,
-                  ]}
-                  onPress={() => setSelectedModelIdx(idx)}
-                >
-                  <View style={styles.modelHeaderRow}>
-                    <View style={styles.modelRadioRow}>
-                      <Text
-                        style={[
-                          styles.modelRadio,
-                          isSelected && styles.modelRadioActive,
-                        ]}
-                      >
-                        {isSelected ? '●' : '○'}
-                      </Text>
-                      <Text style={styles.modelNameText}>{model.name}</Text>
-                    </View>
-                    <View style={styles.modelTagBadge}>
-                      <Text style={styles.modelTagText}>{model.sizeMB} MB</Text>
-                    </View>
-                  </View>
-
-                  <Text style={styles.modelDescText}>{model.description}</Text>
-
-                  {/* Status Badges */}
-                  <View style={styles.modelStatusRow}>
-                    {isActive ? (
-                      <View style={[styles.statusBadge, styles.statusActive]}>
-                        <Text style={styles.statusActiveText}>
-                          🟢 Active in RAM
-                        </Text>
-                      </View>
-                    ) : isThisDownloading ? (
-                      <View
-                        style={[styles.statusBadge, styles.statusDownloading]}
-                      >
-                        <Text style={styles.statusDownloadingText}>
-                          ⏳ Downloading ({downloadProgress?.percentage ?? 0}%)
-                        </Text>
-                      </View>
-                    ) : isDownloaded ? (
-                      <View
-                        style={[styles.statusBadge, styles.statusDownloaded]}
-                      >
-                        <Text style={styles.statusDownloadedText}>
-                          💾 Ready on Device
-                        </Text>
-                      </View>
-                    ) : (
-                      <View
-                        style={[styles.statusBadge, styles.statusNotDownloaded]}
-                      >
-                        <Text style={styles.statusNotDownloadedText}>
-                          ☁️ Free HuggingFace Model
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
-
-            {/* Dynamic Action Area for Selected Model */}
-            <View style={styles.llmActionArea}>
-              {isSelectedDownloading ? (
-                <View style={styles.progressContainer}>
-                  <View style={styles.progressHeaderRow}>
-                    <ActivityIndicator
-                      size="small"
-                      color="#6366F1"
-                      style={{ marginRight: 8 }}
-                    />
-                    <Text style={styles.progressTitle}>
-                      Downloading {selectedModel.name}... (
-                      {downloadProgress?.percentage ?? 0}%)
-                    </Text>
-                  </View>
-                  <View style={styles.progressBarTrack}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        {
-                          width: `${Math.max(3, downloadProgress?.percentage ?? 0)}%`,
-                        },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.progressStats}>
-                    {downloadProgress?.downloadedBytes != null
-                      ? `${(downloadProgress.downloadedBytes / (1024 * 1024)).toFixed(1)} MB / ${(downloadProgress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
-                      : 'Starting streaming download...'}
+            <View
+              style={[
+                styles.modelCard,
+                styles.modelCardSelected,
+                isModelActive && styles.modelCardActive,
+              ]}
+            >
+              <View style={styles.modelHeaderRow}>
+                <Text style={styles.modelNameText}>{universalModel.name}</Text>
+                <View style={styles.modelTagBadge}>
+                  <Text style={styles.modelTagText}>
+                    {universalModel.sizeMB} MB
                   </Text>
                 </View>
-              ) : isSelectedActive ? (
-                <View style={styles.activeModelRow}>
-                  <View style={styles.activeNotice}>
-                    <Text style={styles.activeNoticeText}>
-                      🟢 Ready for live card inference
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.unloadBtn}
-                    onPress={handleUnloadModel}
-                  >
-                    <Text style={styles.unloadBtnText}>⏹️ Unload from RAM</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : isSelectedDownloaded ? (
-                <View style={styles.actionRow}>
-                  <TouchableOpacity
-                    style={[
-                      styles.primaryActionBtn,
-                      slmLoading && styles.btnDisabled,
-                    ]}
-                    onPress={() => handleLoadModel(selectedModelIdx)}
-                    disabled={slmLoading}
-                  >
-                    {slmLoading ? (
-                      <ActivityIndicator color="#FFFFFF" size="small" />
-                    ) : (
-                      <Text style={styles.primaryActionBtnText}>
-                        🚀 Load {selectedModel.name.split(' ')[0]} into RAM
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.reDownloadBtn}
-                    onPress={() => handleDownloadModel(selectedModelIdx)}
-                  >
-                    <Text style={styles.reDownloadBtnText}>⬇️</Text>
-                  </TouchableOpacity>
-                </View>
+              </View>
+              <Text style={styles.modelDescText}>
+                {universalModel.description}
+              </Text>
+              <View style={styles.modelStatusRow}>
+                {isModelActive ? (
+                  <Text style={styles.statusActiveText}>
+                    🟢 Loaded in RAM (Ready)
+                  </Text>
+                ) : isModelDownloading ? (
+                  <Text style={styles.statusDownloadingText}>
+                    ⏳ Downloading ({downloadProgress?.percentage ?? 0}%)
+                  </Text>
+                ) : isModelDownloaded ? (
+                  <Text style={styles.statusDownloadedText}>
+                    💾 Ready on Device Storage
+                  </Text>
+                ) : (
+                  <Text style={styles.statusNotDownloadedText}>
+                    ☁️ Available to Download (1.0 GB)
+                  </Text>
+                )}
+              </View>
+            </View>
+
+            {/* Model Actions */}
+            <View style={styles.modelActionRow}>
+              {isModelActive ? (
+                <TouchableOpacity
+                  style={styles.modelActionBtnDanger}
+                  onPress={handleUnloadModel}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.modelActionBtnText}>Unload from RAM</Text>
+                </TouchableOpacity>
+              ) : isModelDownloaded ? (
+                <TouchableOpacity
+                  style={styles.modelActionBtnPrimary}
+                  onPress={handleLoadModel}
+                  disabled={slmLoading}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.modelActionBtnText}>
+                    {slmLoading
+                      ? 'Loading into RAM...'
+                      : 'Load into RAM (llama.rn)'}
+                  </Text>
+                </TouchableOpacity>
               ) : (
                 <TouchableOpacity
-                  style={styles.primaryActionBtn}
-                  onPress={() => handleDownloadModel(selectedModelIdx)}
+                  style={styles.modelActionBtnPrimary}
+                  onPress={handleDownloadModel}
+                  disabled={isModelDownloading}
+                  activeOpacity={0.8}
                 >
-                  <Text style={styles.primaryActionBtnText}>
-                    ⬇️ Download {selectedModel.name.split(' ')[0]} (
-                    {selectedModel.sizeMB} MB) — Free
+                  <Text style={styles.modelActionBtnText}>
+                    {isModelDownloading
+                      ? `Downloading (${downloadProgress?.percentage ?? 0}%)...`
+                      : `Download Universal Indic Model (${universalModel.sizeMB} MB)`}
                   </Text>
                 </TouchableOpacity>
               )}
             </View>
+
+            {/* Active Settings Summary Chips */}
+            <View style={styles.modelSettingsSummaryRow}>
+              <View style={styles.settingsSummaryChip}>
+                <Text style={styles.settingsSummaryChipText}>
+                  {llmSettings.n_threads} Threads • {llmSettings.n_ctx} Ctx
+                </Text>
+              </View>
+              <View style={styles.settingsSummaryChip}>
+                <Text style={styles.settingsSummaryChipText}>
+                  T={llmSettings.temperature} • max={llmSettings.n_predict}
+                </Text>
+              </View>
+            </View>
+
+            {/* Configure Extraction Prompt & Model Settings Buttons */}
+            <View style={styles.modelConfigButtonsRow}>
+              <TouchableOpacity
+                style={styles.modelPromptConfigBtn}
+                onPress={() => {
+                  setPromptDraft(userPrompt);
+                  setShowPromptEditor(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modelPromptConfigBtnText}>
+                  {isCustomPrompt ? '✏️ Custom Prompt' : '✏️ Prompt'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modelSettingsConfigBtn}
+                onPress={() => {
+                  setTempSettings({ ...llmSettings });
+                  setShowSettingsModal(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modelSettingsConfigBtnText}>
+                  ⚙️ Settings
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
 
-        {/* Primary Singular Scanner Section */}
-        <View style={styles.scannerHeroCard}>
-          <TouchableOpacity
-            style={[styles.scanHeroBtn, loading && styles.btnDisabled]}
-            onPress={handleLaunchScanner}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#FFFFFF" size="large" />
-            ) : (
-              <View style={styles.scanHeroContent}>
-                <Text style={styles.scanHeroIcon}>📷</Text>
-                <Text style={styles.scanHeroTitle}>Scan Card or Document</Text>
-                <Text style={styles.scanHeroSubtitle}>
-                  CameraX Live Outline Detection • Real-time Auto-Crop • Offline
-                  ML Kit
-                </Text>
-              </View>
-            )}
-          </TouchableOpacity>
-
-          {/* File Picker Option (Images & Multi-page PDFs) */}
-          <TouchableOpacity
-            style={[styles.pickHeroBtn, loading && styles.btnDisabled]}
-            onPress={handlePickDocument}
-            disabled={loading}
-          >
-            <View style={styles.pickHeroContent}>
-              <Text style={styles.pickHeroIcon}>📂</Text>
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.pickHeroTitle}>
-                  Import from Storage (Image / Multi-Page PDF)
-                </Text>
-                <Text style={styles.pickHeroSubtitle}>
-                  Select card image or multi-page PDF • Instant native page
-                  rendering
-                </Text>
-              </View>
-            </View>
-          </TouchableOpacity>
-
-          {/* Multi-Page PDF Navigation Bar */}
-          {scannedImageUris.length > 1 && (
-            <View style={styles.multiPageBar}>
-              <Text style={styles.multiPageLabel}>
-                📑 Imported PDF Pages ({scannedImageUris.length} total):
-              </Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={{ marginTop: 6 }}
-              >
-                {scannedImageUris.map((uri, pIdx) => (
-                  <TouchableOpacity
-                    key={pIdx}
-                    style={[
-                      styles.multiPageChip,
-                      selectedPageIndex === pIdx && styles.multiPageChipActive,
-                    ]}
-                    onPress={() => {
-                      setSelectedPageIndex(pIdx);
-                      setScannedImageUri(uri);
-                      setStatusMessage(`Viewing Page ${pIdx + 1}`);
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.multiPageChipText,
-                        selectedPageIndex === pIdx &&
-                          styles.multiPageChipTextActive,
-                      ]}
-                    >
-                      {pIdx === 0
-                        ? '📄 Page 1 (Front)'
-                        : pIdx === 1
-                          ? '📄 Page 2 (Back)'
-                          : `📄 Page ${pIdx + 1}`}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
-          )}
-
-          {/* Page Limit Selector */}
-          <View style={styles.pageLimitRow}>
-            <Text style={styles.pageLimitLabel}>Camera Pages:</Text>
-            {[
-              { label: '1 Page', value: 1 },
-              { label: '2 Pages (Front & Back)', value: 2 },
-              { label: '5 Pages (Multi)', value: 5 },
-            ].map((opt) => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[
-                  styles.pageChip,
-                  pageLimit === opt.value && styles.pageChipActive,
-                ]}
-                onPress={() => setPageLimit(opt.value)}
-              >
-                <Text
-                  style={[
-                    styles.pageChipText,
-                    pageLimit === opt.value && styles.pageChipTextActive,
-                  ]}
-                >
-                  {opt.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Quick Realistic Samples Row */}
-          <View style={styles.sampleSection}>
-            <Text style={styles.sampleSectionLabel}>
-              Or test with sample documents:
-            </Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.sampleScroll}
-            >
-              {SAMPLE_DOCUMENTS.map((sample, idx) => (
-                <TouchableOpacity
-                  key={idx}
-                  style={styles.sampleChip}
-                  onPress={() => handleLoadSample(sample)}
-                >
-                  <Text style={styles.sampleChipTitle}>{sample.title}</Text>
-                  <Text style={styles.sampleChipSub}>{sample.subtitle}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        </View>
-
-        {/* Status Message & Error Banner */}
+        {/* Status Message & Error */}
         {statusMessage && (
           <View style={styles.statusBox}>
             <Text style={styles.statusBoxText}>{statusMessage}</Text>
           </View>
         )}
-
         {error && (
           <View style={styles.errorBox}>
             <Text style={styles.errorBoxText}>⚠️ {error}</Text>
           </View>
         )}
 
-        {/* Thumbnail Preview if Scanned */}
-        {scannedImageUri && (
-          <View style={styles.thumbnailBox}>
-            <Image
-              source={{ uri: scannedImageUri }}
-              style={styles.thumbnailImage}
-              resizeMode="cover"
-            />
-            <View style={styles.thumbnailInfo}>
-              <Text style={styles.thumbnailTitle}>
-                Scanned Image (Perspective Corrected)
+        {/* ─── STAGE 1: CARD EXTRACTION WITH GOOGLE ML KIT ─────────────────────── */}
+        <View style={styles.sectionContainer}>
+          <Text style={styles.stepTitle}>
+            Stage 1: Extract Card with Google ML Kit
+          </Text>
+          <Text style={styles.stepSub}>
+            Total Raw OCR • Multi-Page Cards (Front & Back) & Documents (PDF /
+            Images)
+          </Text>
+
+          <View style={styles.actionButtonRow}>
+            <TouchableOpacity
+              style={[styles.primaryActionBtn, loading && styles.btnDisabled]}
+              onPress={handleScanWithCamera}
+              disabled={loading}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.actionBtnIcon}>📷</Text>
+              <Text style={styles.actionBtnTitle}>Scan Card</Text>
+              <Text style={styles.actionBtnSub}>Multi-Page (up to 10)</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.secondaryActionBtn, loading && styles.btnDisabled]}
+              onPress={handlePickDocument}
+              disabled={loading}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.actionBtnIcon}>📂</Text>
+              <Text style={styles.actionBtnTitle}>Pick Document</Text>
+              <Text style={styles.actionBtnSub}>PDFs & All Images</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Scanned Image / Multi-Page Preview */}
+          {scannedImageUris.length > 0 && (
+            <View style={styles.imagePreviewBox}>
+              <Text style={styles.imagePreviewLabel}>
+                {scannedImageUris.length === 1
+                  ? 'Captured Card Page:'
+                  : `Captured Pages (${scannedImageUris.length} pages):`}
               </Text>
-              <Text style={styles.thumbnailSub}>
-                {scannedImageUris.length > 1
-                  ? `${scannedImageUris.length} pages captured`
-                  : '1 page captured'}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={{ marginTop: 8 }}
+              >
+                {scannedImageUris.map((uri, idx) => (
+                  <View key={idx} style={styles.multiThumbCard}>
+                    <Image
+                      source={{ uri }}
+                      style={styles.multiThumbImg}
+                      resizeMode="cover"
+                    />
+                    <Text style={styles.multiThumbText}>Page {idx + 1}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          )}
+        </View>
+
+        {/* ─── TOTAL RAW OCR DATA DISPLAY ────────────────────────────────────── */}
+        {rawOcrResult && (
+          <View style={styles.sectionContainer}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={{ flex: 1, marginRight: 8 }}>
+                <Text style={styles.stepTitle}>📄 Total Raw OCR Data</Text>
+                <Text style={styles.stepSub}>
+                  Pure untouched text extracted directly from Google ML Kit
+                </Text>
+              </View>
+              <View style={styles.badgeRow}>
+                <TouchableOpacity
+                  style={styles.expandHeaderBtn}
+                  onPress={() =>
+                    setFullscreenModal({
+                      title: '📄 Total Raw OCR Data',
+                      subtitle: 'Google ML Kit • Pure untouched text tokens',
+                      badge: 'Google ML Kit',
+                      badgeType: 'green',
+                      content: rawOcrResult.rawText,
+                      type: 'ocr',
+                    })
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.expandHeaderBtnIcon}>⛶</Text>
+                  <Text style={styles.expandHeaderBtnText}>Expand</Text>
+                </TouchableOpacity>
+
+                <View style={styles.greenBadge}>
+                  <Text style={styles.greenBadgeText}>Google ML Kit</Text>
+                </View>
+                {ocrDurationMs != null && (
+                  <View style={styles.purpleBadge}>
+                    <Text style={styles.purpleBadgeText}>
+                      {ocrDurationMs}ms
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            {/* Complete Raw OCR Box */}
+            <View style={styles.codeBox}>
+              <ScrollView
+                nestedScrollEnabled
+                style={styles.codeScroll}
+                contentContainerStyle={styles.codeScrollContent}
+              >
+                <Text style={styles.codeText} selectable={true}>
+                  {rawOcrResult.rawText}
+                </Text>
+              </ScrollView>
+            </View>
+
+            {/* Actions Bar: Stats + Expand + Copy Button + Clear */}
+            <View style={styles.ocrMetaRow}>
+              <Text style={styles.ocrMetaText}>
+                {rawOcrResult.rawText.length} chars •{' '}
+                {
+                  rawOcrResult.rawText
+                    .split('\n')
+                    .filter((l) => l.trim().length > 0).length
+                }{' '}
+                lines
+              </Text>
+
+              <View style={styles.metaActionsRow}>
+                <TouchableOpacity
+                  style={styles.expandBtn}
+                  onPress={() =>
+                    setFullscreenModal({
+                      title: '📄 Total Raw OCR Data',
+                      subtitle: 'Google ML Kit • Pure untouched text tokens',
+                      badge: 'Google ML Kit',
+                      badgeType: 'green',
+                      content: rawOcrResult.rawText,
+                      type: 'ocr',
+                    })
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.expandBtnText}>⛶ Expand</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.copyBtn,
+                    copiedSection === 'ocr' && styles.copyBtnSuccess,
+                  ]}
+                  onPress={() =>
+                    handleCopyToClipboard(rawOcrResult.rawText, 'ocr')
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.copyBtnText}>
+                    {copiedSection === 'ocr' ? '✅ Copied!' : '📋 Copy'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.clearBtn}
+                  onPress={handleClear}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.clearText}>Clear</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Prompt Config Banner with Edit Button */}
+            <View style={styles.promptConfigCard}>
+              <View style={styles.promptConfigHeader}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    <Text style={styles.promptConfigTitle}>
+                      {isCustomPrompt
+                        ? '✏️ Custom Prompt'
+                        : '⚙️ Extraction Prompt'}
+                    </Text>
+                    {isCustomPrompt && (
+                      <View style={styles.customPromptBadge}>
+                        <Text style={styles.customPromptBadgeText}>
+                          User Feeded
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.promptConfigSub}>
+                    {isCustomPrompt
+                      ? 'LLM will strictly execute your custom saved prompt'
+                      : 'Universal Indic default prompt template'}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.promptEditBtn}
+                  onPress={() => {
+                    setPromptDraft(userPrompt);
+                    setShowPromptEditor(true);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.promptEditBtnText}>✏️ Edit Prompt</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* ─── STAGE 2: BUTTON TO SEND TO UNIVERSAL INDIC LLM ─────────────── */}
+            <View style={styles.sendButtonArea}>
+              <TouchableOpacity
+                style={[
+                  styles.sendLlmButton,
+                  isLlmLoading && styles.btnDisabled,
+                ]}
+                onPress={handleSendToEfficientLlm}
+                disabled={isLlmLoading}
+                activeOpacity={0.8}
+              >
+                {isLlmLoading ? (
+                  <View style={styles.buttonLoadingRow}>
+                    <ActivityIndicator
+                      color="#FFFFFF"
+                      size="small"
+                      style={{ marginRight: 10 }}
+                    />
+                    <Text style={styles.sendLlmButtonText}>
+                      Extracting with Universal Indic LLM...
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.buttonReadyRow}>
+                    <Text style={styles.sendLlmIcon}>🚀</Text>
+                    <Text style={styles.sendLlmButtonText}>
+                      Send to Universal Indic LLM
+                    </Text>
+                    <Text style={styles.sendLlmArrow}>➔</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+
+              <Text style={styles.engineHintText}>
+                Model:{' '}
+                <Text style={{ fontWeight: '700', color: '#A5B4FC' }}>
+                  {isModelActive
+                    ? `${universalModel.name} (Active in RAM • ${llmSettings.n_threads}T • T=${llmSettings.temperature})`
+                    : `${universalModel.name} (Not Loaded in RAM)`}
+                </Text>
               </Text>
             </View>
           </View>
         )}
 
-        {/* Detection Result Card */}
-        {currentViewType && (businessCard || billDocument) && (
-          <View style={styles.resultContainer}>
-            {/* Auto-Detection Banner with Manual Toggle */}
-            <View style={styles.detectionBanner}>
-              <View style={styles.detectionBadge}>
-                <Text style={styles.detectionBadgeText}>
-                  {currentViewType === 'card'
-                    ? '🏷️ AUTO-DETECTED: BUSINESS CARD'
-                    : '🧾 AUTO-DETECTED: BILL / INVOICE'}
+        {/* ─── RAW OUTPUT FROM LLM ───────────────────────────────────────────── */}
+        {rawLlmOutput && (
+          <View style={[styles.sectionContainer, styles.llmSectionHighlight]}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={{ flex: 1, marginRight: 8 }}>
+                <Text style={styles.stepTitle}>🤖 Raw LLM Output</Text>
+                <Text style={styles.stepSub}>
+                  {activeEngineInfo
+                    ? activeEngineInfo.details
+                    : 'Direct unadulterated output from extraction engine'}
                 </Text>
               </View>
-              <TouchableOpacity
-                style={styles.switchViewBtn}
-                onPress={() =>
-                  setForceViewType(currentViewType === 'card' ? 'bill' : 'card')
-                }
-              >
-                <Text style={styles.switchViewBtnText}>
-                  🔄 View as {currentViewType === 'card' ? 'Bill' : 'Card'}
-                </Text>
-              </TouchableOpacity>
+              <View style={styles.badgeRow}>
+                <TouchableOpacity
+                  style={styles.expandHeaderBtn}
+                  onPress={() =>
+                    setFullscreenModal({
+                      title: '🤖 Raw LLM Output',
+                      subtitle: activeEngineInfo
+                        ? `${activeEngineInfo.engineName} • ${activeEngineInfo.details}`
+                        : 'Direct unadulterated output',
+                      badge: activeEngineInfo
+                        ? activeEngineInfo.badgeText
+                        : 'Universal Indic',
+                      badgeType:
+                        activeEngineInfo?.badgeType === 'green'
+                          ? 'green'
+                          : 'indigo',
+                      content: rawLlmOutput,
+                      type: 'llm',
+                    })
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.expandHeaderBtnIcon}>⛶</Text>
+                  <Text style={styles.expandHeaderBtnText}>Expand</Text>
+                </TouchableOpacity>
+
+                <View
+                  style={
+                    activeEngineInfo?.badgeType === 'green'
+                      ? styles.greenBadge
+                      : activeEngineInfo?.badgeType === 'amber'
+                        ? styles.amberBadge
+                        : styles.indigoBadge
+                  }
+                >
+                  <Text
+                    style={
+                      activeEngineInfo?.badgeType === 'green'
+                        ? styles.greenBadgeText
+                        : activeEngineInfo?.badgeType === 'amber'
+                          ? styles.amberBadgeText
+                          : styles.indigoBadgeText
+                    }
+                  >
+                    {activeEngineInfo
+                      ? activeEngineInfo.badgeText
+                      : 'Universal Indic'}
+                  </Text>
+                </View>
+                {llmDurationMs != null && (
+                  <View style={styles.greenBadge}>
+                    <Text style={styles.greenBadgeText}>
+                      ⚡ {llmDurationMs}ms
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
 
-            {/* View 1: Business Card Representation */}
-            {currentViewType === 'card' && businessCard && (
-              <View style={styles.cardViewBox}>
-                <View style={styles.cardHeaderRow}>
-                  <Text style={styles.companyNameText}>
-                    {safeText(businessCard.companyName) || 'Business Card'}
+            {/* Raw Model Output Text Box */}
+            <View style={[styles.codeBox, styles.llmCodeBox]}>
+              <ScrollView
+                nestedScrollEnabled
+                style={styles.codeScroll}
+                contentContainerStyle={styles.codeScrollContent}
+              >
+                <Text
+                  style={[styles.codeText, styles.llmCodeText]}
+                  selectable={true}
+                >
+                  {rawLlmOutput}
+                </Text>
+              </ScrollView>
+            </View>
+
+            {/* LLM Meta & Expand + Copy Buttons */}
+            <View style={styles.ocrMetaRow}>
+              <Text style={styles.ocrMetaText}>
+                {rawLlmOutput.length} characters
+              </Text>
+
+              <View style={styles.metaActionsRow}>
+                <TouchableOpacity
+                  style={styles.expandBtn}
+                  onPress={() =>
+                    setFullscreenModal({
+                      title: '🤖 Raw LLM Output',
+                      subtitle:
+                        'Universal Indic LLM • Direct unadulterated output',
+                      badge: 'Universal Indic',
+                      badgeType: 'indigo',
+                      content: rawLlmOutput,
+                      type: 'llm',
+                    })
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.expandBtnText}>⛶ Expand</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.copyBtn,
+                    copiedSection === 'llm' && styles.copyBtnSuccess,
+                  ]}
+                  onPress={() => handleCopyToClipboard(rawLlmOutput, 'llm')}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.copyBtnText}>
+                    {copiedSection === 'llm' ? '✅ Copied!' : '📋 Copy Output'}
                   </Text>
-                  {businessCard.confidence !== undefined && (
-                    <View
-                      style={[
-                        styles.confidencePill,
-                        businessCard.confidence >= 0.8
-                          ? styles.confidenceHigh
-                          : businessCard.confidence >= 0.65
-                            ? styles.confidenceMed
-                            : styles.confidenceLow,
-                      ]}
-                    >
-                      <Text style={styles.confidencePillText}>
-                        {businessCard.confidence >= 0.8
-                          ? '● High'
-                          : businessCard.confidence >= 0.65
-                            ? '● Med'
-                            : '● Low'}{' '}
-                        {Math.round(businessCard.confidence * 100)}%
-                      </Text>
-                    </View>
-                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* ─── FULLSCREEN EXPAND MODAL ────────────────────────────────────────── */}
+      {fullscreenModal && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          onRequestClose={() => setFullscreenModal(null)}
+          statusBarTranslucent={true}
+        >
+          <View style={styles.fullscreenModalContainer}>
+            <StatusBar
+              barStyle="light-content"
+              backgroundColor="transparent"
+              translucent={true}
+            />
+            <SafeAreaView style={styles.fullscreenSafeArea}>
+              {/* Top Navigation Bar */}
+              <View style={styles.fullscreenHeader}>
+                <TouchableOpacity
+                  style={styles.fullscreenCloseBtn}
+                  onPress={() => setFullscreenModal(null)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.fullscreenCloseBtnText}>✕ Close</Text>
+                </TouchableOpacity>
+
+                <View style={styles.fullscreenTitleContainer}>
+                  <Text style={styles.fullscreenTitle} numberOfLines={1}>
+                    {fullscreenModal.title}
+                  </Text>
+                  <Text style={styles.fullscreenSubtitle} numberOfLines={1}>
+                    {fullscreenModal.subtitle}
+                  </Text>
                 </View>
 
-                {businessCard.requiresSlmReasoning && (
-                  <TouchableOpacity
-                    style={styles.slmPromptBanner}
-                    onPress={handleRefineWithThinking}
-                    disabled={thinkingLoading}
+                <TouchableOpacity
+                  style={[
+                    styles.copyBtn,
+                    copiedSection === fullscreenModal.type &&
+                      styles.copyBtnSuccess,
+                  ]}
+                  onPress={() =>
+                    handleCopyToClipboard(
+                      fullscreenModal.content,
+                      fullscreenModal.type
+                    )
+                  }
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.copyBtnText}>
+                    {copiedSection === fullscreenModal.type
+                      ? '✅ Copied!'
+                      : '📋 Copy'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Stats & Badge Bar */}
+              <View style={styles.fullscreenStatsBar}>
+                <View style={styles.badgeRow}>
+                  <View
+                    style={
+                      fullscreenModal.badgeType === 'green'
+                        ? styles.greenBadge
+                        : styles.indigoBadge
+                    }
                   >
-                    <Text style={styles.slmPromptBannerText}>
-                      ⚡ Ambiguous layout detected (
-                      {Math.round(businessCard.confidence! * 100)}% confidence).
-                      Tap for Local AI Reasoning.
+                    <Text
+                      style={
+                        fullscreenModal.badgeType === 'green'
+                          ? styles.greenBadgeText
+                          : styles.indigoBadgeText
+                      }
+                    >
+                      {fullscreenModal.badge}
                     </Text>
-                  </TouchableOpacity>
-                )}
+                  </View>
+                </View>
 
-                {businessCard.tagline ? (
-                  <Text style={styles.taglineText}>
-                    "{safeText(businessCard.tagline)}"
+                <Text style={styles.fullscreenStatsText}>
+                  {fullscreenModal.content.length} characters •{' '}
+                  {
+                    fullscreenModal.content
+                      .split('\n')
+                      .filter((l) => l.trim().length > 0).length
+                  }{' '}
+                  lines
+                </Text>
+              </View>
+
+              {/* Fullscreen Monospace Scroll Area */}
+              <View style={styles.fullscreenContentWrapper}>
+                <ScrollView
+                  style={styles.fullscreenScrollView}
+                  contentContainerStyle={styles.fullscreenScrollContent}
+                  showsVerticalScrollIndicator={true}
+                >
+                  <Text
+                    style={[
+                      styles.codeText,
+                      fullscreenModal.type === 'llm' && styles.llmCodeText,
+                      styles.fullscreenCodeText,
+                    ]}
+                    selectable={true}
+                  >
+                    {fullscreenModal.content}
                   </Text>
-                ) : null}
+                </ScrollView>
+              </View>
+            </SafeAreaView>
+          </View>
+        </Modal>
+      )}
 
-                {businessCard.slogan ? (
-                  <Text style={styles.sloganText}>
-                    💭 "{safeText(businessCard.slogan)}"
+      {/* ─── FULLSCREEN PROMPT EDITOR MODAL ─────────────────────────────────── */}
+      {showPromptEditor && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          onRequestClose={() => setShowPromptEditor(false)}
+          statusBarTranslucent={true}
+        >
+          <View style={styles.fullscreenModalContainer}>
+            <StatusBar
+              barStyle="light-content"
+              backgroundColor="transparent"
+              translucent={true}
+            />
+            <SafeAreaView style={styles.fullscreenSafeArea}>
+              {/* Top Navigation Bar */}
+              <View style={styles.fullscreenHeader}>
+                <TouchableOpacity
+                  style={styles.fullscreenCloseBtn}
+                  onPress={() => setShowPromptEditor(false)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.fullscreenCloseBtnText}>✕ Cancel</Text>
+                </TouchableOpacity>
+
+                <View style={styles.fullscreenTitleContainer}>
+                  <Text style={styles.fullscreenTitle} numberOfLines={1}>
+                    ✏️ Edit Extraction Prompt
                   </Text>
-                ) : null}
+                  <Text style={styles.fullscreenSubtitle} numberOfLines={1}>
+                    Saved to storage • LLM will use this exact prompt
+                  </Text>
+                </View>
 
-                {/* Contact Persons */}
-                {businessCard.contactPersons &&
-                  businessCard.contactPersons.length > 0 && (
-                    <View style={styles.fieldSection}>
-                      <Text style={styles.fieldSectionLabel}>
-                        👤 CONTACT PERSONS
-                      </Text>
-                      {businessCard.contactPersons.map((p, idx) => (
-                        <Text key={idx} style={styles.personRowText}>
-                          • {safeText(p.name)}{' '}
-                          {p.role ? `(${safeText(p.role)})` : ''}
-                        </Text>
-                      ))}
-                    </View>
-                  )}
+                <TouchableOpacity
+                  style={styles.savePromptBtn}
+                  onPress={handleSavePrompt}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.savePromptBtnText}>💾 Save</Text>
+                </TouchableOpacity>
+              </View>
 
-                {/* Phones */}
-                {((businessCard.labeledPhones &&
-                  businessCard.labeledPhones.length > 0) ||
-                  businessCard.phoneNumbers.length > 0) && (
-                  <View style={styles.fieldSection}>
-                    <Text style={styles.fieldSectionLabel}>
-                      📞 PHONE NUMBERS
+              {/* Instructions Bar with Reset Button */}
+              <View style={styles.promptEditorHelpBar}>
+                <Text style={styles.promptEditorHelpText}>
+                  Use{' '}
+                  <Text style={{ color: '#38BDF8', fontWeight: '700' }}>
+                    {'{{OCR_TEXT}}'}
+                  </Text>{' '}
+                  where the card OCR text should be placed.
+                </Text>
+
+                <TouchableOpacity
+                  style={styles.resetPromptBtn}
+                  onPress={handleResetPrompt}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.resetPromptBtnText}>
+                    🔄 Reset Default
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Multiline TextInput for Prompt */}
+              <View style={styles.promptInputWrapper}>
+                <TextInput
+                  style={styles.promptTextInput}
+                  value={promptDraft}
+                  onChangeText={setPromptDraft}
+                  multiline={true}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  textAlignVertical="top"
+                  placeholder="Enter your custom prompt template..."
+                  placeholderTextColor="#475569"
+                />
+              </View>
+            </SafeAreaView>
+          </View>
+        </Modal>
+      )}
+
+      {/* ─── FULLSCREEN MODEL & INFERENCE SETTINGS MODAL ────────────────────── */}
+      {showSettingsModal && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          onRequestClose={() => setShowSettingsModal(false)}
+          statusBarTranslucent={true}
+        >
+          <View style={styles.fullscreenModalContainer}>
+            <StatusBar
+              barStyle="light-content"
+              backgroundColor="transparent"
+              translucent={true}
+            />
+            <SafeAreaView style={styles.fullscreenSafeArea}>
+              {/* Top Navigation Bar */}
+              <View style={styles.fullscreenHeader}>
+                <TouchableOpacity
+                  style={styles.fullscreenCloseBtn}
+                  onPress={() => setShowSettingsModal(false)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.fullscreenCloseBtnText}>✕ Cancel</Text>
+                </TouchableOpacity>
+
+                <View style={styles.fullscreenTitleContainer}>
+                  <Text style={styles.fullscreenTitle} numberOfLines={1}>
+                    ⚙️ Model & Inference Settings
+                  </Text>
+                  <Text style={styles.fullscreenSubtitle} numberOfLines={1}>
+                    Configure llama.rn hardware & generation parameters
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.savePromptBtn}
+                  onPress={handleSaveSettings}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.savePromptBtnText}>💾 Save</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Scrollable Settings Body */}
+              <ScrollView
+                style={styles.settingsScrollView}
+                contentContainerStyle={styles.settingsScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {/* ─── TARGET MODEL INFO ────────────────────────────────────── */}
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>
+                    🧠 Universal Indic Thinking Module
+                  </Text>
+                  <Text style={styles.settingsSectionSubtitle}>
+                    All inference is strictly executed using this selected
+                    on-device model
+                  </Text>
+                  <View style={styles.targetModelInfoBox}>
+                    <Text style={styles.targetModelName}>
+                      {universalModel.name}
                     </Text>
-                    <View style={styles.chipRow}>
-                      {businessCard.labeledPhones &&
-                      businessCard.labeledPhones.length > 0
-                        ? businessCard.labeledPhones.map((lp, idx) => (
-                            <View key={idx} style={styles.phoneChip}>
-                              <Text style={styles.phoneChipText}>
-                                {lp.label ? `[${safeText(lp.label)}] ` : ''}
-                                {safeText(lp.number)}
-                              </Text>
-                            </View>
-                          ))
-                        : businessCard.phoneNumbers.map((phone, idx) => (
-                            <View key={idx} style={styles.phoneChip}>
-                              <Text style={styles.phoneChipText}>
-                                {safeText(phone)}
-                              </Text>
-                            </View>
-                          ))}
-                    </View>
-                  </View>
-                )}
-
-                {/* Email & Web */}
-                {((businessCard.emails && businessCard.emails.length > 0) ||
-                  (businessCard.websites &&
-                    businessCard.websites.length > 0)) && (
-                  <View style={styles.fieldSection}>
-                    <Text style={styles.fieldSectionLabel}>
-                      🌐 DIGITAL CONTACTS
+                    <Text style={styles.targetModelMeta}>
+                      Quantization: Q4_K_M • Size: {universalModel.sizeMB} MB •
+                      Engine: llama.rn
                     </Text>
-                    <View style={styles.chipRow}>
-                      {businessCard.emails?.map((em, idx) => (
-                        <View key={`em-${idx}`} style={styles.digitalChip}>
-                          <Text style={styles.digitalChipText}>
-                            ✉️ {safeText(em)}
-                          </Text>
-                        </View>
-                      ))}
-                      {businessCard.websites?.map((w, idx) => (
-                        <View key={`w-${idx}`} style={styles.digitalChip}>
-                          <Text style={styles.digitalChipText}>
-                            🌐 {safeText(w)}
-                          </Text>
-                        </View>
-                      ))}
-                    </View>
                   </View>
-                )}
+                </View>
 
-                {/* Addresses */}
-                {businessCard.addressLines &&
-                  businessCard.addressLines.length > 0 && (
-                    <View style={styles.fieldSection}>
-                      <Text style={styles.fieldSectionLabel}>📍 ADDRESS</Text>
-                      {businessCard.addressLines.map((addr, idx) => (
-                        <Text key={idx} style={styles.addressText}>
-                          • {safeText(addr)}
-                        </Text>
-                      ))}
-                    </View>
-                  )}
+                {/* ─── SECTION 1: SAMPLING & CREATIVITY ─────────────────────── */}
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>
+                    🎯 Sampling & Creativity (ctx.completion)
+                  </Text>
+                  <Text style={styles.settingsSectionSubtitle}>
+                    Control randomness, probability cutoffs, and token selection
+                  </Text>
 
-                {/* Pincode & GSTIN */}
-                {(businessCard.pincode || businessCard.gstin) && (
-                  <View style={styles.fieldSection}>
-                    <Text style={styles.fieldSectionLabel}>🏷️ IDENTIFIERS</Text>
-                    <View style={styles.chipRow}>
-                      {businessCard.pincode ? (
-                        <View style={styles.idChip}>
-                          <Text style={styles.idChipText}>
-                            PIN: {safeText(businessCard.pincode)}
-                          </Text>
-                        </View>
-                      ) : null}
-                      {businessCard.gstin ? (
-                        <View style={styles.idChip}>
-                          <Text style={styles.idChipText}>
-                            GSTIN: {safeText(businessCard.gstin)}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-                  </View>
-                )}
-
-                {/* Provided Services & Products */}
-                {businessCard.providedServices &&
-                  businessCard.providedServices.length > 0 && (
-                    <View style={styles.fieldSection}>
-                      <Text style={styles.fieldSectionLabel}>
-                        📦 PRODUCTS & SERVICES
+                  {/* Temperature */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>Temperature</Text>
+                      <Text style={styles.settingValueBadge}>
+                        T = {tempSettings.temperature}
                       </Text>
-                      <View style={styles.chipRow}>
-                        {businessCard.providedServices.map((srv, idx) => (
-                          <View
-                            key={idx}
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      0.0–0.1 = deterministic (recommended for OCR). 0.7+ =
+                      creative.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.0, 0.1, 0.2, 0.5, 0.7, 1.0].map((t) => (
+                        <TouchableOpacity
+                          key={t}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.temperature === t &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, temperature: t })
+                          }
+                        >
+                          <Text
                             style={[
-                              styles.idChip,
-                              { backgroundColor: '#1E3A8A' },
+                              styles.paramPillText,
+                              tempSettings.temperature === t &&
+                                styles.paramPillTextSelected,
                             ]}
                           >
+                            {t.toFixed(1)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Top-P */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Top-P (Nucleus Sampling)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.top_p}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Cumulative probability cutoff for candidate tokens.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.8, 0.9, 0.95, 1.0].map((p) => (
+                        <TouchableOpacity
+                          key={p}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.top_p === p &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, top_p: p })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.top_p === p &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {p.toFixed(2)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Top-K */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>Top-K</Text>
+                      <Text style={styles.settingValueBadge}>
+                        K = {tempSettings.top_k}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Limits token selection to K highest-probability tokens.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[20, 40, 60, 100].map((k) => (
+                        <TouchableOpacity
+                          key={k}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.top_k === k &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, top_k: k })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.top_k === k &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {k}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Min-P */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>Min-P Sampling</Text>
+                      <Text style={styles.settingValueBadge}>
+                        min_p = {tempSettings.min_p}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Minimum probability relative to prime token (modern
+                      alternative to Top-P).
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.0, 0.05, 0.1, 0.2].map((mp) => (
+                        <TouchableOpacity
+                          key={mp}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.min_p === mp &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, min_p: mp })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.min_p === mp &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {mp.toFixed(2)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Typical-P */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Typical-P Sampling
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.typical_p}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Locally typical sampling (1.0 = disabled).
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.9, 0.95, 1.0].map((tp) => (
+                        <TouchableOpacity
+                          key={tp}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.typical_p === tp &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, typical_p: tp })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.typical_p === tp &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {tp.toFixed(2)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Random Seed */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Seed (Reproducibility)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.seed === -1
+                          ? 'Random (-1)'
+                          : `Seed: ${tempSettings.seed}`}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Fixed seed guarantees bit-for-bit identical outputs for
+                      benchmarking.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[-1, 42, 1337, 2026].map((s) => (
+                        <TouchableOpacity
+                          key={s}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.seed === s && styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, seed: s })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.seed === s &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {s === -1 ? '🎲 Random' : `🔢 ${s}`}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+
+                {/* ─── SECTION 2: OUTPUT LIMITS & PENALTIES ──────────────────── */}
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>
+                    📏 Output Limits & Penalties
+                  </Text>
+                  <Text style={styles.settingsSectionSubtitle}>
+                    Control output length, repetition damping, and stopping
+                    tokens
+                  </Text>
+
+                  {/* Max Tokens / n_predict */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Max Output Tokens (n_predict)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.n_predict} tokens
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Maximum tokens generated. Typical business card JSON needs
+                      200–350 tokens.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[200, 300, 400, 600, 800, 1024].map((n) => (
+                        <TouchableOpacity
+                          key={n}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.n_predict === n &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, n_predict: n })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.n_predict === n &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {n}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Repetition Penalty */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Repetition Penalty
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.penalty_repeat.toFixed(2)}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      1.0 = disabled. 1.1–1.2 reduces repetitive loops.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[1.0, 1.05, 1.1, 1.2, 1.3].map((r) => (
+                        <TouchableOpacity
+                          key={r}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.penalty_repeat === r &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              penalty_repeat: r,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.penalty_repeat === r &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {r.toFixed(2)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Frequency Penalty */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>Frequency Penalty</Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.penalty_freq.toFixed(2)}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Penalizes tokens proportionally based on frequency in
+                      output.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.0, 0.1, 0.2, 0.5].map((f) => (
+                        <TouchableOpacity
+                          key={f}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.penalty_freq === f &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              penalty_freq: f,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.penalty_freq === f &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {f.toFixed(1)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Presence Penalty */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>Presence Penalty</Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.penalty_present.toFixed(2)}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Penalizes tokens if they have appeared at least once.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[0.0, 0.1, 0.2, 0.5].map((pr) => (
+                        <TouchableOpacity
+                          key={pr}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.penalty_present === pr &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              penalty_present: pr,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.penalty_present === pr &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {pr.toFixed(1)}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Repeat Penalty Window (penalty_last_n) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Penalty Window (last N tokens)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.penalty_last_n} tokens
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Number of previous tokens to scan for repetition damping.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[32, 64, 128, 256].map((pln) => (
+                        <TouchableOpacity
+                          key={pln}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.penalty_last_n === pln &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              penalty_last_n: pln,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.penalty_last_n === pln &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {pln}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Stop Sequences */}
+                  <View style={styles.settingItem}>
+                    <Text style={styles.settingLabel}>
+                      Stop Sequences (Comma Separated)
+                    </Text>
+                    <Text style={styles.settingHelpText}>
+                      Tokens that immediately halt generation when emitted by
+                      the model.
+                    </Text>
+                    <TextInput
+                      style={styles.settingsTextInput}
+                      value={tempSettings.stopSequences}
+                      onChangeText={(val) =>
+                        setTempSettings({ ...tempSettings, stopSequences: val })
+                      }
+                      placeholder="<|im_end|>, </s>, <|endoftext|>"
+                      placeholderTextColor="#475569"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                  </View>
+                </View>
+
+                {/* ─── SECTION 3: STRUCTURED GRAMMAR & THINKING ──────────────── */}
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>
+                    📝 Structured Grammar & Reasoning
+                  </Text>
+                  <Text style={styles.settingsSectionSubtitle}>
+                    Enforce mathematical JSON schemas via GBNF and control
+                    chain-of-thought
+                  </Text>
+
+                  {/* Enable GBNF Grammar */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        GBNF Grammar Constraint
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.enable_grammar
+                          ? '🔒 Active'
+                          : '🔓 Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Strictly constrains token sampling to 100% valid JSON
+                      syntax.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.enable_grammar === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              enable_grammar: val,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.enable_grammar === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '🔒 Enable GBNF' : '🔓 Disable (Free Text)'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Grammar Editor */}
+                  {tempSettings.enable_grammar && (
+                    <View style={styles.settingItem}>
+                      <Text style={styles.settingLabel}>
+                        GBNF Grammar Definition
+                      </Text>
+                      <Text style={styles.settingHelpText}>
+                        GGML Backus-Naur Form grammar rules.
+                      </Text>
+                      <TextInput
+                        style={[styles.settingsTextInput, { minHeight: 100 }]}
+                        value={tempSettings.grammar_text}
+                        onChangeText={(val) =>
+                          setTempSettings({
+                            ...tempSettings,
+                            grammar_text: val,
+                          })
+                        }
+                        multiline={true}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                      />
+                    </View>
+                  )}
+
+                  {/* Enable Thinking */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Thinking Blocks (&lt;think&gt; tags)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.enable_thinking ? 'Enabled' : 'Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Allows model to perform internal chain-of-thought
+                      reasoning before output.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.enable_thinking === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              enable_thinking: val,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.enable_thinking === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '💡 Enable Thinking' : '🚫 Disable Thinking'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Thinking Budget */}
+                  {tempSettings.enable_thinking && (
+                    <View style={styles.settingItem}>
+                      <View style={styles.settingLabelRow}>
+                        <Text style={styles.settingLabel}>
+                          Thinking Budget Tokens
+                        </Text>
+                        <Text style={styles.settingValueBadge}>
+                          {tempSettings.thinking_budget_tokens === 0
+                            ? 'Unlimited'
+                            : `${tempSettings.thinking_budget_tokens} tokens`}
+                        </Text>
+                      </View>
+                      <Text style={styles.settingHelpText}>
+                        Maximum tokens allowed inside &lt;think&gt; block before
+                        forcing answer.
+                      </Text>
+                      <View style={styles.pillRow}>
+                        {[0, 100, 250, 500].map((tb) => (
+                          <TouchableOpacity
+                            key={tb}
+                            style={[
+                              styles.paramPill,
+                              tempSettings.thinking_budget_tokens === tb &&
+                                styles.paramPillSelected,
+                            ]}
+                            onPress={() =>
+                              setTempSettings({
+                                ...tempSettings,
+                                thinking_budget_tokens: tb,
+                              })
+                            }
+                          >
                             <Text
-                              style={[styles.idChipText, { color: '#93C5FD' }]}
+                              style={[
+                                styles.paramPillText,
+                                tempSettings.thinking_budget_tokens === tb &&
+                                  styles.paramPillTextSelected,
+                              ]}
                             >
-                              {safeText(srv)}
+                              {tb === 0 ? '♾️ Unlimited' : `${tb} tk`}
                             </Text>
-                          </View>
+                          </TouchableOpacity>
                         ))}
                       </View>
                     </View>
                   )}
-
-                {/* Unified Hybrid AI Extraction Button */}
-                <TouchableOpacity
-                  style={[
-                    styles.refineBtn,
-                    {
-                      backgroundColor: '#6366F1',
-                      marginTop: 14,
-                      marginBottom: 12,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8,
-                    },
-                    thinkingLoading && styles.btnDisabled,
-                  ]}
-                  onPress={handleRefineWithThinking}
-                  disabled={thinkingLoading}
-                >
-                  {thinkingLoading ? (
-                    <>
-                      <ActivityIndicator color="#FFFFFF" size="small" />
-                      <Text style={styles.refineBtnText}>
-                        Refining with{' '}
-                        {activeModelObj
-                          ? activeModelObj.name.split(' ')[0]
-                          : 'Hybrid AI'}
-                        ...
-                      </Text>
-                    </>
-                  ) : (
-                    <Text style={styles.refineBtnText}>
-                      ⚡ Scan & Refine with Hybrid AI (
-                      {activeModelObj
-                        ? activeModelObj.name.split(' ')[0]
-                        : 'Deterministic + Semantic'}
-                      )
-                    </Text>
-                  )}
-                </TouchableOpacity>
-
-                {/* Hybrid Extraction Breakdown Banner */}
-                {isHybridActive && hybridResult && (
-                  <View style={styles.hybridBox}>
-                    <View style={styles.hybridBoxHeader}>
-                      <Text style={styles.hybridBoxTitle}>
-                        ⚡ Deterministic Extraction Engine
-                      </Text>
-                      <View style={styles.zeroErrorTag}>
-                        <Text style={styles.zeroErrorTagText}>
-                          0% Hallucination Guarantee
-                        </Text>
-                      </View>
-                    </View>
-
-                    <Text style={styles.hybridItem}>
-                      📱 Mobiles:{' '}
-                      {hybridResult.mobiles.length > 0
-                        ? hybridResult.mobiles.join(', ')
-                        : 'None'}
-                    </Text>
-                    <Text style={styles.hybridItem}>
-                      ☎️ Landlines (STD):{' '}
-                      {hybridResult.landlines.length > 0
-                        ? hybridResult.landlines.join(', ')
-                        : 'None'}
-                    </Text>
-                    <Text style={styles.hybridItem}>
-                      🏛️ GSTIN:{' '}
-                      {hybridResult.gstin
-                        ? `${hybridResult.gstin} (Modulo-36 Valid)`
-                        : 'None'}
-                    </Text>
-                    <Text style={styles.hybridItem}>
-                      📮 Pincodes:{' '}
-                      {hybridResult.pincodes.length > 0
-                        ? hybridResult.pincodes.join(', ')
-                        : 'None'}
-                    </Text>
-
-                    <TouchableOpacity
-                      style={styles.residualToggle}
-                      onPress={() => setShowResidualModal(!showResidualModal)}
-                    >
-                      <Text style={styles.residualToggleText}>
-                        {showResidualModal
-                          ? '▲ Hide SLM Residual Text'
-                          : '▼ Inspect Residual Text (Input to SLM)'}
-                      </Text>
-                    </TouchableOpacity>
-
-                    {showResidualModal && (
-                      <View style={styles.residualContainer}>
-                        <Text style={styles.residualPromptExplain}>
-                          The deterministic engine blacks out extracted numbers
-                          and GSTIN below before feeding into the SLM so the
-                          neural model cannot hallucinate contact numbers:
-                        </Text>
-                        <ScrollView
-                          style={styles.residualScroll}
-                          nestedScrollEnabled
-                        >
-                          <Text style={styles.residualCodeText} selectable>
-                            {hybridResult.residualText}
-                          </Text>
-                        </ScrollView>
-                      </View>
-                    )}
-                  </View>
-                )}
-              </View>
-            )}
-
-            {/* View 2: Bill / Invoice Representation */}
-            {currentViewType === 'bill' && billDocument && (
-              <View style={styles.billViewBox}>
-                <View style={styles.billHeaderRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.merchantNameText}>
-                      {safeText(billDocument.issuerName) || 'Invoice / Bill'}
-                    </Text>
-                    {billDocument.invoiceNumber ? (
-                      <Text style={styles.sampleChipSub}>
-                        Invoice #{billDocument.invoiceNumber}
-                        {billDocument.invoiceDate
-                          ? ` • ${billDocument.invoiceDate}`
-                          : ''}
-                      </Text>
-                    ) : null}
-                  </View>
-                  {billDocument.amountDue != null && (
-                    <Text style={styles.totalAmountText}>
-                      ${Number(billDocument.amountDue).toFixed(2)}
-                    </Text>
-                  )}
                 </View>
 
-                {/* Line Items Table */}
-                <View style={styles.tableCard}>
-                  <Text style={styles.tableTitle}>
-                    RECONSTRUCTED LINE ITEMS
+                {/* ─── SECTION 4: HARDWARE & MEMORY ALLOCATION ───────────────── */}
+                <View style={styles.settingsSection}>
+                  <Text style={styles.settingsSectionTitle}>
+                    ⚡ Hardware, Memory & Accelerators (initLlama)
                   </Text>
-                  <View style={styles.tableHeaderRow}>
-                    <Text style={[styles.th, { flex: 3.5 }]}>DESCRIPTION</Text>
-                    <Text
-                      style={[styles.th, { flex: 1.5, textAlign: 'center' }]}
-                    >
-                      CODE
-                    </Text>
-                    <Text style={[styles.th, { flex: 2, textAlign: 'right' }]}>
-                      AMOUNT
-                    </Text>
-                  </View>
+                  <Text style={styles.settingsSectionSubtitle}>
+                    Parameters used when loading the model into device RAM
+                  </Text>
 
-                  {billDocument.lineItems &&
-                  billDocument.lineItems.length > 0 ? (
-                    billDocument.lineItems.map((item, idx) => (
-                      <View key={idx} style={styles.tableDataRow}>
-                        <Text style={[styles.td, { flex: 3.5 }]}>
-                          {safeText(item.description)}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.td,
-                            { flex: 1.5, textAlign: 'center' },
-                          ]}
-                        >
-                          {item.code || '—'}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.tdBold,
-                            { flex: 2, textAlign: 'right' },
-                          ]}
-                        >
-                          $
-                          {Number(
-                            item.billedAmount ?? item.patientResponsibility ?? 0
-                          ).toFixed(2)}
-                        </Text>
-                      </View>
-                    ))
-                  ) : (
-                    <Text style={styles.emptyTableText}>
-                      No line items recognized.
-                    </Text>
-                  )}
-
-                  {/* Financial Summary */}
-                  <View style={styles.tableFooter}>
-                    {billDocument.subtotal != null && (
-                      <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Subtotal</Text>
-                        <Text style={styles.summaryVal}>
-                          ${Number(billDocument.subtotal).toFixed(2)}
-                        </Text>
-                      </View>
-                    )}
-                    <View style={[styles.summaryRow, styles.grandTotalRow]}>
-                      <Text style={styles.grandTotalLabel}>
-                        TOTAL AMOUNT DUE
+                  {/* CPU Threads */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        CPU Threads (n_threads)
                       </Text>
-                      <Text style={styles.grandTotalVal}>
-                        $
-                        {Number(
-                          billDocument.amountDue ?? billDocument.subtotal ?? 0
-                        ).toFixed(2)}
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.n_threads} Threads
                       </Text>
                     </View>
+                    <Text style={styles.settingHelpText}>
+                      Higher = faster generation, but consumes more battery &
+                      heat. 4 is optimal.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[1, 2, 4, 6, 8].map((th) => (
+                        <TouchableOpacity
+                          key={th}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.n_threads === th &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, n_threads: th })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.n_threads === th &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {th} Core{th > 1 ? 's' : ''}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Context Size (n_ctx) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Context Window (n_ctx)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.n_ctx} Tokens
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Total memory allocated for prompt + generated tokens in KV
+                      cache.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[512, 1024, 2048, 4096].map((ctx) => (
+                        <TouchableOpacity
+                          key={ctx}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.n_ctx === ctx &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, n_ctx: ctx })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.n_ctx === ctx &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {ctx}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Batch Size (n_batch) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Prompt Batch Size (n_batch)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.n_batch}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Batch size for prompt processing. 256 or 512 is standard.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[128, 256, 512, 1024].map((b) => (
+                        <TouchableOpacity
+                          key={b}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.n_batch === b &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, n_batch: b })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.n_batch === b &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {b}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Micro Batch Size (n_ubatch) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Physical Micro-Batch (n_ubatch)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.n_ubatch}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Physical batch size for compute kernels.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[32, 64, 128, 256].map((ub) => (
+                        <TouchableOpacity
+                          key={ub}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.n_ubatch === ub &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, n_ubatch: ub })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.n_ubatch === ub &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {ub}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* KV Cache Quantization - Keys (cache_type_k) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        KV Cache Quantization (Keys)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.cache_type_k.toUpperCase()}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      q8_0 or q4_0 cuts context RAM usage by 50%–75%.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {(['f16', 'q8_0', 'q4_0'] as const).map((kType) => (
+                        <TouchableOpacity
+                          key={kType}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.cache_type_k === kType &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              cache_type_k: kType,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.cache_type_k === kType &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {kType.toUpperCase()}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* KV Cache Quantization - Values (cache_type_v) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        KV Cache Quantization (Values)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.cache_type_v.toUpperCase()}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Quantization precision for attention values.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {(['f16', 'q8_0', 'q4_0'] as const).map((vType) => (
+                        <TouchableOpacity
+                          key={vType}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.cache_type_v === vType &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              cache_type_v: vType,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.cache_type_v === vType &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {vType.toUpperCase()}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* RAM Lock (use_mlock) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Lock in RAM (use_mlock)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.use_mlock ? 'Enabled' : 'Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Prevents Android OS from paging model memory to disk.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.use_mlock === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, use_mlock: val })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.use_mlock === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '🔒 Enabled' : '🔓 Disabled'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Memory Mapping (use_mmap) */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Memory Map File (use_mmap)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.use_mmap ? 'Enabled' : 'Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Maps model directly from storage (reduces physical RAM
+                      footprint).
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.use_mmap === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({ ...tempSettings, use_mmap: val })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.use_mmap === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '⚡ mmap Enabled' : '🚫 mmap Disabled'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Flash Attention */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Flash Attention (flash_attn)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.flash_attn ? 'Enabled' : 'Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Accelerated attention kernel (recommended for GPU/NPU).
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.flash_attn === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              flash_attn: val,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.flash_attn === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '⚡ Enabled' : 'Disabled'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* No Extra Buffer Types */}
+                  <View style={styles.settingItem}>
+                    <View style={styles.settingLabelRow}>
+                      <Text style={styles.settingLabel}>
+                        Reduce Weight Buffers (no_extra_bufts)
+                      </Text>
+                      <Text style={styles.settingValueBadge}>
+                        {tempSettings.no_extra_bufts ? 'Enabled' : 'Disabled'}
+                      </Text>
+                    </View>
+                    <Text style={styles.settingHelpText}>
+                      Disables extra buffers for weight repacking to conserve
+                      RAM.
+                    </Text>
+                    <View style={styles.pillRow}>
+                      {[false, true].map((val) => (
+                        <TouchableOpacity
+                          key={String(val)}
+                          style={[
+                            styles.paramPill,
+                            tempSettings.no_extra_bufts === val &&
+                              styles.paramPillSelected,
+                          ]}
+                          onPress={() =>
+                            setTempSettings({
+                              ...tempSettings,
+                              no_extra_bufts: val,
+                            })
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.paramPillText,
+                              tempSettings.no_extra_bufts === val &&
+                                styles.paramPillTextSelected,
+                            ]}
+                          >
+                            {val ? '💾 Conserve RAM' : 'Standard'}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* CPU Core Mask */}
+                  <View style={styles.settingItem}>
+                    <Text style={styles.settingLabel}>
+                      CPU Affinity Mask (cpu_mask)
+                    </Text>
+                    <Text style={styles.settingHelpText}>
+                      Specifies CPU cores (e.g. "4-7" for high-performance
+                      cores, empty for OS default).
+                    </Text>
+                    <TextInput
+                      style={styles.settingsTextInput}
+                      value={tempSettings.cpu_mask}
+                      onChangeText={(val) =>
+                        setTempSettings({ ...tempSettings, cpu_mask: val })
+                      }
+                      placeholder="e.g. 4-7 or 0,2,4,6 (Leave empty for default)"
+                      placeholderTextColor="#475569"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
                   </View>
                 </View>
-              </View>
-            )}
 
-            {/* Expandable Raw OCR Text */}
-            <TouchableOpacity
-              style={styles.ocrAccordionHeader}
-              onPress={() => setShowRawOcr(!showRawOcr)}
-            >
-              <Text style={styles.ocrAccordionTitle}>
-                {showRawOcr ? '▼ Hide Raw OCR Text' : '▶ View Raw OCR Text'}
-              </Text>
-            </TouchableOpacity>
-
-            {showRawOcr && ocrResult && (
-              <View style={styles.rawOcrBox}>
-                <Text style={styles.rawOcrContent}>{ocrResult.rawText}</Text>
-              </View>
-            )}
+                {/* Reset to Safe Defaults Button */}
+                <View style={styles.settingsFooterSection}>
+                  <TouchableOpacity
+                    style={styles.resetSettingsBtn}
+                    onPress={handleResetSettings}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.resetSettingsBtnText}>
+                      🔄 Reset All to Defaults
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </SafeAreaView>
           </View>
-        )}
-      </ScrollView>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -1798,14 +2777,15 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#0B0D17',
+    paddingTop: STATUS_BAR_TOP_PADDING,
   },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'android' ? 16 : 24,
-    paddingBottom: 40,
+    paddingTop: 8,
+    paddingBottom: BOTTOM_NAV_PADDING,
   },
   header: {
     marginBottom: 16,
@@ -1849,973 +2829,842 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#E2E8F0',
   },
-
-  // LLM Manager Card
-  llmManagerCard: {
+  statusBox: {
+    backgroundColor: '#1E293B',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 14,
+    borderLeftWidth: 3,
+    borderLeftColor: '#6366F1',
+  },
+  statusBoxText: {
+    fontSize: 12,
+    color: '#CBD5E1',
+    lineHeight: 16,
+  },
+  errorBox: {
+    backgroundColor: '#450A0A',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#DC2626',
+  },
+  errorBoxText: {
+    fontSize: 12,
+    color: '#FCA5A5',
+  },
+  sectionContainer: {
     backgroundColor: '#13182E',
     borderRadius: 14,
     padding: 16,
-    marginBottom: 18,
+    marginBottom: 16,
     borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  llmSectionHighlight: {
     borderColor: '#6366F1',
   },
-  llmManagerHeader: {
+  stepTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  stepSub: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  actionButtonRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 14,
+  },
+  primaryActionBtn: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    borderRadius: 12,
+    padding: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+  },
+  secondaryActionBtn: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    borderRadius: 12,
+    padding: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#8B5CF6',
+  },
+  actionBtnIcon: {
+    fontSize: 24,
+    marginBottom: 6,
+  },
+  actionBtnTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#F8FAFC',
+  },
+  actionBtnSub: {
+    fontSize: 10,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  btnDisabled: {
+    opacity: 0.6,
+  },
+  imagePreviewBox: {
+    marginTop: 14,
+  },
+  imagePreviewLabel: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginBottom: 4,
+    fontWeight: '600',
+  },
+  multiThumbCard: {
+    marginRight: 10,
+    alignItems: 'center',
+  },
+  multiThumbImg: {
+    width: 90,
+    height: 120,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  multiThumbText: {
+    fontSize: 10,
+    color: '#94A3B8',
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  sectionHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  greenBadge: {
+    backgroundColor: '#05966933',
+    borderColor: '#10B981',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  greenBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#34D399',
+  },
+  purpleBadge: {
+    backgroundColor: '#6366F133',
+    borderColor: '#818CF8',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  purpleBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#A5B4FC',
+  },
+  indigoBadge: {
+    backgroundColor: '#8B5CF633',
+    borderColor: '#A78BFA',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  indigoBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#C4B5FD',
+  },
+  codeBox: {
+    backgroundColor: '#030712',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1F2937',
+    padding: 12,
+    minHeight: 120,
+    maxHeight: 240,
+  },
+  llmCodeBox: {
+    borderColor: '#4338CA',
+    minHeight: 160,
+    maxHeight: 300,
+  },
+  codeScroll: {
+    flex: 1,
+  },
+  codeScrollContent: {
+    paddingBottom: 4,
+  },
+  codeText: {
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: '#E2E8F0',
+    lineHeight: 18,
+  },
+  llmCodeText: {
+    color: '#A5B4FC',
+  },
+  ocrMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 10,
     marginBottom: 14,
   },
-  llmManagerTitle: {
+  ocrMetaText: {
+    fontSize: 11,
+    color: '#64748B',
+  },
+  metaActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  copyBtn: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  copyBtnSuccess: {
+    backgroundColor: '#064E3B',
+    borderColor: '#10B981',
+  },
+  copyBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#E2E8F0',
+  },
+  clearBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+  },
+  clearText: {
+    fontSize: 11,
+    color: '#F87171',
+    fontWeight: '600',
+  },
+  sendButtonArea: {
+    marginTop: 4,
+    alignItems: 'center',
+  },
+  sendLlmButton: {
+    width: '100%',
+    backgroundColor: '#6366F1',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#6366F1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  buttonReadyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buttonLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendLlmIcon: {
+    fontSize: 18,
+    marginRight: 8,
+  },
+  sendLlmButtonText: {
     fontSize: 15,
     fontWeight: '800',
     color: '#FFFFFF',
   },
+  sendLlmArrow: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    marginLeft: 8,
+    fontWeight: '800',
+  },
+  engineHintText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  llmManagerCard: {
+    backgroundColor: '#1E2340',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  llmManagerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  llmManagerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
   llmManagerSubtitle: {
     fontSize: 11,
-    color: '#A5B4FC',
-    marginTop: 2,
+    color: '#94A3B8',
   },
   llmCloseBtn: {
     padding: 4,
   },
   llmCloseBtnText: {
+    fontSize: 14,
     color: '#94A3B8',
-    fontSize: 16,
     fontWeight: '700',
   },
   modelCard: {
-    backgroundColor: '#0F1326',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 10,
+    backgroundColor: '#0F172A',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
     borderWidth: 1,
-    borderColor: '#242B46',
+    borderColor: '#334155',
   },
   modelCardSelected: {
     borderColor: '#6366F1',
-    backgroundColor: '#171D3D',
   },
   modelCardActive: {
     borderColor: '#10B981',
+    backgroundColor: '#064E3B22',
   },
   modelHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  modelRadioRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  modelRadio: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginRight: 8,
-  },
-  modelRadioActive: {
-    color: '#6366F1',
-  },
   modelNameText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
-    color: '#F8FAFC',
+    color: '#FFFFFF',
   },
   modelTagBadge: {
-    backgroundColor: '#1E2548',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
+    backgroundColor: '#334155',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
   },
   modelTagText: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#A5B4FC',
+    color: '#CBD5E1',
+    fontWeight: '600',
   },
   modelDescText: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#94A3B8',
     marginTop: 4,
-    marginLeft: 22,
   },
   modelStatusRow: {
-    marginTop: 8,
-    marginLeft: 22,
-    flexDirection: 'row',
-  },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  statusActive: {
-    backgroundColor: '#064E3B',
-  },
-  statusActiveText: {
-    color: '#34D399',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  statusDownloading: {
-    backgroundColor: '#312E81',
-  },
-  statusDownloadingText: {
-    color: '#A5B4FC',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  statusDownloaded: {
-    backgroundColor: '#1E3A8A',
-  },
-  statusDownloadedText: {
-    color: '#93C5FD',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  statusNotDownloaded: {
-    backgroundColor: '#1E2340',
-  },
-  statusNotDownloadedText: {
-    color: '#94A3B8',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-
-  // LLM Action Area
-  llmActionArea: {
     marginTop: 6,
   },
-  actionRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  primaryActionBtn: {
-    backgroundColor: '#4F46E5',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    flex: 1,
-  },
-  primaryActionBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  reDownloadBtn: {
-    backgroundColor: '#1E2340',
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  reDownloadBtnText: {
-    fontSize: 14,
-  },
-  activeModelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-  },
-  activeNotice: {
-    flex: 1,
-  },
-  activeNoticeText: {
-    color: '#34D399',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  unloadBtn: {
-    backgroundColor: '#7F1D1D',
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    borderRadius: 8,
-  },
-  unloadBtnText: {
-    color: '#FCA5A5',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  progressContainer: {
-    backgroundColor: '#0B0D17',
-    padding: 12,
-    borderRadius: 8,
-  },
-  progressHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  progressTitle: {
-    color: '#E2E8F0',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  progressBarTrack: {
-    height: 6,
-    backgroundColor: '#1E2340',
-    borderRadius: 3,
-    overflow: 'hidden',
-    marginBottom: 6,
-  },
-  progressBarFill: {
-    height: '100%',
-    backgroundColor: '#6366F1',
-  },
-  progressStats: {
-    color: '#94A3B8',
+  statusActiveText: {
     fontSize: 10,
+    color: '#34D399',
+    fontWeight: '700',
   },
-
-  // Scanner Hero Card
-  scannerHeroCard: {
-    backgroundColor: '#13182E',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#242B46',
+  statusDownloadingText: {
+    fontSize: 10,
+    color: '#FBBF24',
+    fontWeight: '600',
   },
-  scanHeroBtn: {
+  statusDownloadedText: {
+    fontSize: 10,
+    color: '#60A5FA',
+    fontWeight: '600',
+  },
+  statusNotDownloadedText: {
+    fontSize: 10,
+    color: '#94A3B8',
+  },
+  modelActionRow: {
+    marginTop: 6,
+  },
+  modelActionBtnPrimary: {
     backgroundColor: '#6366F1',
-    borderRadius: 12,
-    paddingVertical: 18,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scanHeroContent: {
+    paddingVertical: 10,
+    borderRadius: 8,
     alignItems: 'center',
   },
-  scanHeroIcon: {
-    fontSize: 28,
-    marginBottom: 4,
+  modelActionBtnDanger: {
+    backgroundColor: '#DC2626',
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
   },
-  scanHeroTitle: {
+  modelActionBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
     color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '800',
   },
-  scanHeroSubtitle: {
-    color: '#E0E7FF',
-    fontSize: 11,
-    marginTop: 3,
-    textAlign: 'center',
-  },
-  pageLimitRow: {
+  expandHeaderBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 12,
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
   },
-  pageLimitLabel: {
-    color: '#94A3B8',
+  expandHeaderBtnIcon: {
     fontSize: 11,
-    fontWeight: '700',
-    marginRight: 8,
+    color: '#38BDF8',
+    marginRight: 4,
   },
-  pageChip: {
-    backgroundColor: '#1E2340',
+  expandHeaderBtnText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  expandBtn: {
+    backgroundColor: '#1E293B',
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  pageChipActive: {
-    backgroundColor: '#3730A3',
-  },
-  pageChipText: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  pageChipTextActive: {
-    color: '#FFFFFF',
-  },
-  sampleSection: {
-    marginTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#1E2340',
-    paddingTop: 12,
-  },
-  sampleSectionLabel: {
-    color: '#64748B',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  sampleScroll: {
-    flexDirection: 'row',
-  },
-  sampleChip: {
-    backgroundColor: '#1E2340',
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  expandBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  fullscreenModalContainer: {
+    flex: 1,
+    backgroundColor: '#13182E',
+    paddingTop: STATUS_BAR_TOP_PADDING,
+  },
+  fullscreenSafeArea: {
+    flex: 1,
+    backgroundColor: '#0B0D17',
+  },
+  fullscreenHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+    backgroundColor: '#13182E',
+  },
+  fullscreenCloseBtn: {
+    backgroundColor: '#1E293B',
     paddingHorizontal: 12,
     paddingVertical: 8,
-    marginRight: 8,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#334155',
   },
-  sampleChipTitle: {
-    color: '#F1F5F9',
-    fontSize: 11,
+  fullscreenCloseBtnText: {
+    fontSize: 12,
     fontWeight: '700',
+    color: '#F87171',
   },
-  sampleChipSub: {
-    color: '#94A3B8',
+  fullscreenTitleContainer: {
+    flex: 1,
+    marginHorizontal: 10,
+  },
+  fullscreenTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  fullscreenSubtitle: {
     fontSize: 10,
+    color: '#94A3B8',
     marginTop: 2,
   },
-
-  // Status & Error Boxes
-  statusBox: {
-    backgroundColor: '#064E3B33',
-    borderColor: '#059669',
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 14,
-  },
-  statusBoxText: {
-    color: '#34D399',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  errorBox: {
-    backgroundColor: '#7F1D1D33',
-    borderColor: '#DC2626',
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 14,
-  },
-  errorBoxText: {
-    color: '#F87171',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  // Thumbnail
-  thumbnailBox: {
+  fullscreenStatsBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#13182E',
-    borderRadius: 10,
-    padding: 8,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#242B46',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#0F172A',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
   },
-  thumbnailImage: {
-    width: 44,
-    height: 44,
-    borderRadius: 6,
-    marginRight: 10,
+  fullscreenStatsText: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
   },
-  thumbnailInfo: {
+  fullscreenContentWrapper: {
+    flex: 1,
+    backgroundColor: '#030712',
+  },
+  fullscreenScrollView: {
     flex: 1,
   },
-  thumbnailTitle: {
-    color: '#F1F5F9',
-    fontSize: 12,
-    fontWeight: '700',
+  fullscreenScrollContent: {
+    padding: 16,
+    paddingBottom: BOTTOM_NAV_PADDING + 24,
   },
-  thumbnailSub: {
-    color: '#94A3B8',
-    fontSize: 11,
+  fullscreenCodeText: {
+    fontSize: 13,
+    lineHeight: 20,
   },
-
-  // Result Section
-  resultContainer: {
-    marginBottom: 20,
-  },
-  detectionBanner: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#1E2340',
-    padding: 10,
+  promptConfigCard: {
+    backgroundColor: '#0F172A',
     borderRadius: 10,
+    padding: 12,
+    marginTop: 4,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: '#334155',
   },
-  detectionBadge: {
-    backgroundColor: '#3730A3',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  detectionBadgeText: {
-    color: '#E0E7FF',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  switchViewBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  switchViewBtnText: {
-    color: '#93C5FD',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-
-  // Card View
-  cardViewBox: {
-    backgroundColor: '#13182E',
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#242B46',
-  },
-  cardHeaderRow: {
+  promptConfigHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
-    flexWrap: 'wrap',
+    alignItems: 'center',
   },
-  confidencePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-  },
-  confidenceHigh: {
-    backgroundColor: '#064E3B',
-  },
-  confidenceMed: {
-    backgroundColor: '#78350F',
-  },
-  confidenceLow: {
-    backgroundColor: '#7F1D1D',
-  },
-  confidencePillText: {
-    fontSize: 11,
+  promptConfigTitle: {
+    fontSize: 13,
     fontWeight: '700',
-    color: '#F8FAFC',
-  },
-  slmPromptBanner: {
-    backgroundColor: '#1E293B',
-    borderColor: '#38BDF8',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginTop: 10,
-  },
-  slmPromptBannerText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#38BDF8',
-  },
-  companyNameText: {
-    fontSize: 18,
-    fontWeight: '800',
     color: '#FFFFFF',
-    letterSpacing: -0.3,
   },
-  taglineText: {
-    fontSize: 12,
-    fontStyle: 'italic',
+  promptConfigSub: {
+    fontSize: 10,
     color: '#94A3B8',
     marginTop: 2,
   },
-  sloganText: {
+  customPromptBadge: {
+    backgroundColor: '#38BDF822',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  customPromptBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  promptEditBtn: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#6366F1',
+  },
+  promptEditBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#A5B4FC',
+  },
+  modelPromptConfigBtn: {
+    backgroundColor: '#0F172A',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#6366F1',
+    paddingVertical: 8,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  modelPromptConfigBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#A5B4FC',
+  },
+  savePromptBtn: {
+    backgroundColor: '#059669',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  savePromptBtnText: {
     fontSize: 12,
-    fontStyle: 'italic',
-    color: '#FCD34D',
-    marginTop: 4,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
-  fieldSection: {
-    marginTop: 14,
+  promptEditorHelpBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#0F172A',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
   },
-  fieldSectionLabel: {
+  promptEditorHelpText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    flex: 1,
+    marginRight: 8,
+  },
+  resetPromptBtn: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  resetPromptBtnText: {
     fontSize: 10,
-    fontWeight: '800',
-    color: '#64748B',
-    marginBottom: 6,
-    letterSpacing: 0.5,
+    fontWeight: '600',
+    color: '#CBD5E1',
   },
-  personRowText: {
-    color: '#F1F5F9',
+  promptInputWrapper: {
+    flex: 1,
+    backgroundColor: '#030712',
+    padding: 12,
+  },
+  promptTextInput: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: '#E2E8F0',
+    lineHeight: 18,
+    textAlignVertical: 'top',
+  },
+
+  // ─── Settings Modal & Badges ──────────────────────────────────────────────
+  amberBadge: {
+    backgroundColor: '#F59E0B26',
+    borderColor: '#F59E0B',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  amberBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FCD34D',
+  },
+  modelSettingsSummaryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  settingsSummaryChip: {
+    backgroundColor: '#0F172A',
+    borderColor: '#334155',
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  settingsSummaryChipText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#94A3B8',
+  },
+  modelConfigButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6,
+  },
+  modelSettingsConfigBtn: {
+    flex: 1,
+    backgroundColor: '#1E293B',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    paddingVertical: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelSettingsConfigBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  settingsScrollView: {
+    flex: 1,
+    backgroundColor: '#0B0D17',
+  },
+  settingsScrollContent: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  settingsSection: {
+    backgroundColor: '#131826',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 16,
+    marginBottom: 16,
+  },
+  settingsSectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#F8FAFC',
+    marginBottom: 4,
+  },
+  settingsSectionSubtitle: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginBottom: 14,
+  },
+  engineModeContainer: {
+    gap: 10,
+  },
+  engineOptionCard: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1.5,
+    borderColor: '#1E293B',
+    borderRadius: 10,
+    padding: 12,
+  },
+  engineOptionCardSelected: {
+    borderColor: '#6366F1',
+    backgroundColor: '#1E1B4B4D',
+  },
+  engineOptionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  engineOptionTitle: {
     fontSize: 13,
-    marginBottom: 2,
+    fontWeight: '700',
+    color: '#E2E8F0',
   },
-  chipRow: {
+  checkIcon: {
+    color: '#38BDF8',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  engineOptionDesc: {
+    fontSize: 11,
+    color: '#94A3B8',
+    lineHeight: 16,
+  },
+  settingItem: {
+    marginBottom: 16,
+  },
+  settingLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  settingLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#E2E8F0',
+  },
+  settingValueBadge: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#38BDF8',
+    backgroundColor: '#0F172A',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  settingHelpText: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 8,
+  },
+  pillRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
   },
-  phoneChip: {
-    backgroundColor: '#064E3B',
+  paramPill: {
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 6,
-  },
-  phoneChipText: {
-    color: '#34D399',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  digitalChip: {
-    backgroundColor: '#1E3A8A',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-  },
-  digitalChipText: {
-    color: '#93C5FD',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  addressText: {
-    color: '#CBD5E1',
-    fontSize: 12,
-    marginBottom: 3,
-  },
-  idChip: {
-    backgroundColor: '#312E81',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  idChipText: {
-    color: '#A5B4FC',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  refineBtn: {
-    backgroundColor: '#7C3AED',
-    marginTop: 18,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  refineBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-
-  // Bill View
-  billViewBox: {
-    backgroundColor: '#13182E',
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#242B46',
-  },
-  billHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  merchantNameText: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    flex: 1,
-  },
-  totalAmountText: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#34D399',
-  },
-  tableCard: {
-    backgroundColor: '#0F1326',
-    borderRadius: 10,
-    padding: 12,
-  },
-  tableTitle: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#64748B',
-    marginBottom: 8,
-    letterSpacing: 0.5,
-  },
-  tableHeaderRow: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E2340',
-    paddingBottom: 6,
-    marginBottom: 6,
-  },
-  th: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#94A3B8',
-  },
-  tableDataRow: {
-    flexDirection: 'row',
-    paddingVertical: 4,
-    alignItems: 'center',
-  },
-  td: {
-    fontSize: 11,
-    color: '#CBD5E1',
-  },
-  tdBold: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#F8FAFC',
-  },
-  emptyTableText: {
-    color: '#64748B',
-    fontSize: 11,
-    paddingVertical: 8,
-    textAlign: 'center',
-  },
-  tableFooter: {
-    borderTopWidth: 1,
-    borderTopColor: '#1E2340',
-    marginTop: 8,
-    paddingTop: 8,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 2,
-  },
-  summaryLabel: {
-    fontSize: 11,
-    color: '#94A3B8',
-  },
-  summaryVal: {
-    fontSize: 11,
-    color: '#E2E8F0',
-  },
-  grandTotalRow: {
-    borderTopWidth: 1,
-    borderTopColor: '#334155',
-    marginTop: 4,
-    paddingTop: 4,
-  },
-  grandTotalLabel: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#FFFFFF',
-  },
-  grandTotalVal: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#34D399',
-  },
-
-  // Accordion
-  ocrAccordionHeader: {
-    backgroundColor: '#13182E',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#242B46',
-  },
-  ocrAccordionTitle: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  rawOcrBox: {
-    backgroundColor: '#0F1326',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 6,
-    borderWidth: 1,
-    borderColor: '#1E2340',
-  },
-  rawOcrContent: {
-    color: '#CBD5E1',
-    fontSize: 11,
-    lineHeight: 16,
-    fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo',
-  },
-
-  // PaddleOCR Multilingual Studio Styles
-  paddleHeaderPillActive: {
-    backgroundColor: '#0284C722',
-    borderColor: '#0284C7',
-  },
-  paddleManagerCard: {
     backgroundColor: '#0F172A',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: '#0284C7',
-  },
-  paddleManagerTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#38BDF8',
-  },
-  paddleStatusCard: {
-    backgroundColor: '#1E293B',
-    borderRadius: 10,
-    padding: 12,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  paddleStatusRow: {
-    marginBottom: 6,
-  },
-  paddleStatusTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#F8FAFC',
-  },
-  paddleStatusSub: {
-    fontSize: 11,
-  },
-  paddleLatencyTagText: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  paddleConsoleSubtitle: {
-    fontSize: 10,
-    color: '#94A3B8',
-    marginTop: 3,
-  },
-  paddleFieldsBox: {
-    backgroundColor: '#1E293B',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 10,
-  },
-  paddleFieldsHeader: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#E2E8F0',
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  paddleFieldRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 6,
-  },
-  paddleFieldKey: {
-    width: 80,
-    fontSize: 11,
-    color: '#94A3B8',
-    fontWeight: '600',
-  },
-  paddleFieldVal: {
-    flex: 1,
-    fontSize: 11,
-    color: '#F8FAFC',
-    fontWeight: '600',
-  },
-  paddlePhoneBadge: {
-    backgroundColor: '#064E3B',
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: '#059669',
-  },
-  paddlePhoneText: {
-    color: '#6EE7B7',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  paddleRawConsoleBox: {
-    backgroundColor: '#030712',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    padding: 10,
-  },
-  paddleRawConsoleHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  paddleRawConsoleTitle: {
-    fontSize: 11,
-    color: '#94A3B8',
-    fontWeight: '700',
-  },
-  paddleMiniToggleBtn: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  paddleMiniToggleText: {
-    color: '#38BDF8',
-    fontSize: 9,
-    fontWeight: '700',
-  },
-  paddleRawScrollView: {
-    maxHeight: 140,
-  },
-  paddleRawTextStream: {
-    fontFamily: 'Courier',
-    fontSize: 11,
-    color: '#38BDF8',
-    lineHeight: 16,
-  },
-
-  /* Storage File Picker Hero Button */
-  pickHeroBtn: {
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#38BDF8',
-    padding: 14,
-    marginTop: 10,
-  },
-  pickHeroContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  pickHeroIcon: {
-    fontSize: 26,
-  },
-  pickHeroTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#38BDF8',
-    letterSpacing: 0.3,
-  },
-  pickHeroSubtitle: {
-    fontSize: 11,
-    color: '#94A3B8',
-    marginTop: 2,
-  },
-
-  /* Multi-Page PDF Navigation Bar */
-  multiPageBar: {
-    backgroundColor: '#082F49',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#0284C7',
-    padding: 10,
-    marginTop: 12,
-  },
-  multiPageLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#7DD3FC',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  multiPageChip: {
-    backgroundColor: '#0C4A6E',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginRight: 6,
-    borderWidth: 1,
-    borderColor: '#0369A1',
-  },
-  multiPageChipActive: {
-    backgroundColor: '#0284C7',
-    borderColor: '#38BDF8',
-  },
-  multiPageChipText: {
-    color: '#BAE6FD',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  multiPageChipTextActive: {
-    color: '#FFFFFF',
-    fontWeight: '800',
-  },
-
-  /* Quick Import Button inside PaddleOCR Studio */
-  paddleImportBtn: {
-    backgroundColor: '#1E293B',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#38BDF8',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  paddleImportBtnText: {
-    color: '#38BDF8',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-
-  btnDisabled: {
-    opacity: 0.6,
-  },
-  hybridBox: {
-    backgroundColor: '#064E3B22',
-    borderColor: '#059669',
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 12,
-    marginTop: 12,
-  },
-  hybridBoxHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  hybridBoxTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#34D399',
-  },
-  zeroErrorTag: {
-    backgroundColor: '#064E3B',
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  zeroErrorTagText: {
-    fontSize: 9,
-    fontWeight: '700',
-    color: '#6EE7B7',
-  },
-  hybridItem: {
-    fontSize: 11,
-    color: '#E2E8F0',
-    marginBottom: 4,
-    fontWeight: '500',
-  },
-  residualToggle: {
-    marginTop: 8,
-    paddingVertical: 4,
-  },
-  residualToggleText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#5EEAD4',
-  },
-  residualContainer: {
-    marginTop: 6,
-    backgroundColor: '#020617',
-    borderRadius: 6,
     borderWidth: 1,
     borderColor: '#1E293B',
-    padding: 8,
   },
-  residualPromptExplain: {
-    fontSize: 10,
+  paramPillSelected: {
+    backgroundColor: '#4F46E5',
+    borderColor: '#818CF8',
+  },
+  paramPillText: {
+    fontSize: 11,
+    fontWeight: '600',
     color: '#94A3B8',
-    marginBottom: 6,
-    lineHeight: 14,
   },
-  residualScroll: {
-    maxHeight: 110,
+  paramPillTextSelected: {
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
-  residualCodeText: {
-    fontSize: 10,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  settingsTextInput: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    borderRadius: 8,
+    padding: 10,
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  settingsFooterSection: {
+    marginTop: 4,
+    marginBottom: 20,
+    alignItems: 'center',
+  },
+  targetModelInfoBox: {
+    backgroundColor: '#0F172A',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  targetModelName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#38BDF8',
+    marginBottom: 4,
+  },
+  targetModelMeta: {
+    fontSize: 11,
+    color: '#94A3B8',
+  },
+  resetSettingsBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  resetSettingsBtnText: {
     color: '#CBD5E1',
-    lineHeight: 14,
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

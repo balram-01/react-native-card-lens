@@ -10,7 +10,11 @@ import {
   isValidPersonCandidate,
   BULLET_PREFIX_REGEX,
   SERVICES_SECTION_HEADER_REGEX,
+  buildCardExtractionPrompt,
+  BUSINESS_CARD_GBNF_GRAMMAR,
+  extractHybridUniversalCard,
 } from './LocalCardLLM';
+import { refineCardWithThinkingModule } from './ThinkingModule';
 import type {
   RawOcrResult,
   BarcodeResult,
@@ -28,6 +32,8 @@ import type {
   ScanCardOptions,
   ScanDocumentOptions,
   ScanBillOptions,
+  ExtractCardMlKitToLLMOptions,
+  MlKitToLLMResult,
 } from './types';
 
 // ─── re-export all types so library consumers can import from one place ───────
@@ -66,6 +72,8 @@ export type {
   ScanDocumentOptions,
   ScanBillOptions,
   ConfidenceAssessment,
+  ExtractCardMlKitToLLMOptions,
+  MlKitToLLMResult,
 } from './types';
 
 export {
@@ -440,6 +448,83 @@ async function scanCardPagesPaddle(
         : pagesData
             .map((c, i) => `--- Page ${i + 1} ---\n${c.rawText}`)
             .join('\n\n'),
+  };
+}
+
+/**
+ * Simple 2-stage business card extraction flow:
+ *  1. Extracts on-device raw OCR from the card image using Google ML Kit.
+ *  2. Feeds the raw OCR text directly to the most efficient LLM module (or custom inference handler),
+ *     returning the total raw OCR data, the raw LLM output, and structured card fields.
+ *
+ * @param imageUri URI of the card image (`file://` or `content://`).
+ * @param options  Configuration options (OCR script, inferenceHandler, or options).
+ * @returns        `MlKitToLLMResult` containing rawOcr, rawLlmOutput, and structured card.
+ *
+ * @example
+ * ```ts
+ * const { rawOcr, rawLlmOutput, card } = await extractCardWithMlKitAndLLM('file:///path/card.jpg');
+ * console.log('Raw OCR from ML Kit:', rawOcr.rawText);
+ * console.log('Raw LLM Output:', rawLlmOutput);
+ * console.log('Parsed Card:', card.companyName, card.phoneNumbers);
+ * ```
+ */
+export async function extractCardWithMlKitAndLLM(
+  imageUri: string,
+  options?: ExtractCardMlKitToLLMOptions
+): Promise<MlKitToLLMResult> {
+  const startTime = Date.now();
+  const ocrStartTime = Date.now();
+
+  const rawOcr = await recognizeText(imageUri, {
+    engine: 'mlkit',
+    script: options?.script ?? 'auto',
+  });
+  const ocrLatency = Date.now() - ocrStartTime;
+
+  const llmStartTime = Date.now();
+  let rawLlmOutput = '';
+  let card: BusinessCard;
+
+  if (options?.inferenceHandler) {
+    const prompt = buildCardExtractionPrompt(rawOcr.rawText);
+    rawLlmOutput = await options.inferenceHandler(
+      prompt,
+      BUSINESS_CARD_GBNF_GRAMMAR
+    );
+    const emptyCard: BusinessCard = {
+      rawText: rawOcr.rawText,
+      contactPersons: [],
+      phoneNumbers: [],
+      emails: [],
+      websites: [],
+      addressLines: [],
+    };
+    try {
+      const match = rawLlmOutput.match(/\{[\s\S]*\}/);
+      card = match ? { ...emptyCard, ...JSON.parse(match[0]) } : emptyCard;
+    } catch {
+      card = emptyCard;
+    }
+  } else {
+    // Built-in most efficient on-device thinking module
+    const refined = await refineCardWithThinkingModule(rawOcr.rawText);
+    card = extractHybridUniversalCard(rawOcr.rawText, refined);
+    rawLlmOutput = JSON.stringify(card, null, 2);
+  }
+
+  const llmLatency = Date.now() - llmStartTime;
+  const totalLatency = Date.now() - startTime;
+
+  return {
+    rawOcr,
+    rawLlmOutput,
+    card,
+    latencyMs: {
+      ocr: ocrLatency,
+      llm: llmLatency,
+      total: totalLatency,
+    },
   };
 }
 

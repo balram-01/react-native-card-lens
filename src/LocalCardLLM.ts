@@ -88,35 +88,19 @@ import type {
  * to 100% valid JSON matching the BusinessCard schema.
  * Prevents markdown fences, trailing commas, and hallucinated keys.
  */
-export const BUSINESS_CARD_GBNF_GRAMMAR = `
-root ::= "{" ws
-  "\\"companyName\\":" ws nullable-string "," ws
-  "\\"tagline\\":" ws nullable-string "," ws
-  "\\"providedServices\\":" ws string-array "," ws
-  "\\"contactPersons\\":" ws person-array "," ws
-  "\\"phoneNumbers\\":" ws phone-array "," ws
-  "\\"emails\\":" ws string-array "," ws
-  "\\"websites\\":" ws string-array "," ws
-  "\\"addressLines\\":" ws string-array "," ws
-  "\\"pincode\\":" ws nullable-pincode "," ws
-  "\\"gstin\\":" ws nullable-gstin ws
-  "}"
-
-person-array ::= "[" ws (person (ws "," ws person)*)? ws "]"
-person ::= "{" ws "\\"name\\":" ws string "," ws "\\"role\\":" ws nullable-string ws "}"
-
-string-array ::= "[" ws (string (ws "," ws string)*)? ws "]"
-phone-array  ::= "[" ws (phone  (ws "," ws phone)*)?  ws "]"
-
-phone ::= "\\"" [6-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\\""
-nullable-pincode ::= "null" | "\\"" [1-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\\""
-nullable-gstin ::= "null" | "\\"" [0-9] [0-9] [A-Z] [A-Z] [A-Z] [A-Z] [A-Z] [0-9] [0-9] [0-9] [0-9] [A-Z] [0-9A-Z] [A-Z] [0-9A-Z] "\\""
-nullable-string ::= "null" | string
-string ::= "\\"" char* "\\""
-char ::= [^"\\\\\\x7F\\x00-\\x1F] | "\\\\" escape
-escape ::= ["\\\\bfnrt/] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
-ws ::= [ \\t\\n]?
-`.trim();
+export const BUSINESS_CARD_GBNF_GRAMMAR = [
+  'root ::= "{" ws "\\"companyName\\":" ws nullable-string "," ws "\\"tagline\\":" ws nullable-string "," ws "\\"providedServices\\":" ws string-array "," ws "\\"contactPersons\\":" ws person-array "," ws "\\"phoneNumbers\\":" ws phone-array "," ws "\\"emails\\":" ws string-array "," ws "\\"websites\\":" ws string-array "," ws "\\"addressLines\\":" ws string-array "," ws "\\"pincode\\":" ws nullable-pincode "," ws "\\"gstin\\":" ws nullable-gstin ws "}"',
+  'person-array ::= "[" ws (person (ws "," ws person)*)? ws "]"',
+  'person ::= "{" ws "\\"name\\":" ws string "," ws "\\"role\\":" ws nullable-string ws "}"',
+  'string-array ::= "[" ws (string (ws "," ws string)*)? ws "]"',
+  'phone-array  ::= "[" ws (phone  (ws "," ws phone)*)?  ws "]"',
+  'phone ::= "\\"" [6-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\\""',
+  'nullable-pincode ::= "null" | "\\"" [1-9] [0-9] [0-9] [0-9] [0-9] [0-9] "\\""',
+  'nullable-gstin ::= "null" | "\\"" [0-9] [0-9] [A-Z] [A-Z] [A-Z] [A-Z] [A-Z] [0-9] [0-9] [0-9] [0-9] [A-Z] [0-9A-Z] [A-Z] [0-9A-Z] "\\""',
+  'nullable-string ::= "null" | string',
+  'string ::= "\\"" ([^"\\\\] | "\\\\" ["\\\\/bfnrt])* "\\""',
+  'ws ::= [ \\t\\n]?',
+].join('\n');
 
 /**
  * Registry of free, open-weights on-device models that run 100% locally.
@@ -482,25 +466,8 @@ export interface LocalLLMOptions {
  */
 export function buildCardExtractionPrompt(
   rawText: string,
-  baseline?: Partial<BusinessCard>
+  _baseline?: Partial<BusinessCard>
 ): string {
-  const hints: string[] = [];
-  if (baseline?.companyName)
-    hints.push(`Heuristic Company: "${baseline.companyName}"`);
-  if (baseline?.tagline) hints.push(`Heuristic Tagline: "${baseline.tagline}"`);
-  if (baseline?.providedServices && baseline.providedServices.length > 0) {
-    hints.push(
-      `Detected Offerings/Products: ${baseline.providedServices.join(', ')}`
-    );
-  }
-  if (baseline?.phoneNumbers && baseline.phoneNumbers.length > 0) {
-    hints.push(`Detected Phone Numbers: ${baseline.phoneNumbers.join(', ')}`);
-  }
-  const contextSnippet =
-    hints.length > 0
-      ? `\nOCR Pre-Analysis Context:\n${hints.map((h) => `- ${h}`).join('\n')}\n`
-      : '';
-
   return `<|im_start|>system
 You are a business card field mapper.
 You receive OCR text from a business card. Your only job is to map text tokens into the correct JSON fields.
@@ -521,10 +488,8 @@ tagline
 
 contactPersons
   - Human names only. Usually 1-3 words. Has an honorific or title nearby (Prop., MD, Dr., Adv., CA, Owner).
-  - NOT company names. NOT building names. NOT product or service names.
-  - NEVER extract items listed under "OUR SERVICES", "SERVICES", "PRODUCTS", "DEALS IN", or lines starting with bullet symbols (>, •, -, *) as persons!
-  - NEVER extract fitness, workout, or training activities (e.g. "Zumba", "Crossfit", "Pilates", "Ramfit Training", "Six Pack", "Weight Training") as contact persons!
-  - If no human person is named on the card: [].
+  - NOT company names. NOT building names. NOT product names.
+  - If no person is named on the card: [].
 
 phoneNumbers
   - 10-digit Indian mobile numbers starting with 6, 7, 8, or 9.
@@ -551,10 +516,8 @@ gstin
   - Exactly 15 characters: 2 digits + 5 letters + 4 digits + 1 letter + 1 alphanumeric + "Z" + 1 alphanumeric.
   - null if absent.
 
-providedServices
-  - List of services, products, or offerings listed on the card (e.g. "CCTV CAMERA", "LAPTOP REPAIRING", "DATA RECOVERY").
-  - Includes bulleted items (lines starting with '>', '•', '-', '*') or items listed under "OUR SERVICES", "SERVICES", "PRODUCTS", "DEALS IN".
-  - Strip leading bullet symbols ('>', '•', '-', '*').
+PROVIDED SERVICES
+  - List of services or products offered. Usually bulleted or comma-separated.
   - Short phrases only (1-4 words each).
   - [] if none listed.
 
@@ -616,51 +579,6 @@ Return JSON:
 <|im_end|>
 <|im_start|>user
 OCR Text:
-OUR SERVICES
-> COMPUTER
-> CCTV CAMERA
-> DOOR LOCK SYSTEM
-> EPBX INTERCOM SYSTEM
-> LAPTOP REPAIRING
-> TONNER REFILLING
-> NETWORKING
-> BIOMETRIC ATTENDANCE MACHINE
-> VIDEO DOOR PHONE
-> PRINTER REPAIRING
-> DATA RECOVERY
-> AMC (ANNUAL MAINTENANCE)
-
-Return JSON:
-<|im_end|>
-<|im_start|>assistant
-{
-  "companyName": null,
-  "tagline": null,
-  "contactPersons": [],
-  "phoneNumbers": [],
-  "emails": [],
-  "websites": [],
-  "addresses": [],
-  "pincode": null,
-  "gstin": null,
-  "providedServices": [
-    "COMPUTER",
-    "CCTV CAMERA",
-    "DOOR LOCK SYSTEM",
-    "EPBX INTERCOM SYSTEM",
-    "LAPTOP REPAIRING",
-    "TONNER REFILLING",
-    "NETWORKING",
-    "BIOMETRIC ATTENDANCE MACHINE",
-    "VIDEO DOOR PHONE",
-    "PRINTER REPAIRING",
-    "DATA RECOVERY",
-    "AMC (ANNUAL MAINTENANCE)"
-  ]
-}
-<|im_end|>
-<|im_start|>user
-${contextSnippet}OCR Text:
 ${rawText}
 
 Return JSON:

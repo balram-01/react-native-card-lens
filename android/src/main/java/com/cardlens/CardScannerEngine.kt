@@ -305,9 +305,9 @@ object CardScannerEngine {
     }
 
     /**
-     * Fuse raw text from Latin and Devanagari passes.
-     * Prefers Devanagari text for Devanagari-containing lines,
-     * Latin text for pure-ASCII contact lines.
+     * Fuse raw text from Latin and Devanagari passes without dropping valid text.
+     * Keeps all Devanagari pass lines (which captures both Indic script and Latin/digits)
+     * and appends any distinct lines recognized by the Latin pass, ensuring total raw OCR fidelity.
      */
     fun fuseRawText(latinText: String, devanagariText: String): String {
         if (latinText.isBlank()) return devanagariText
@@ -319,34 +319,17 @@ object CardScannerEngine {
         val result = mutableListOf<String>()
         val seen = mutableSetOf<String>()
 
-        // 1. Add all Devanagari pass lines (which already recognize both Devanagari script and digits)
+        // 1. Add all Devanagari pass lines (Google ML Kit Devanagari recognizes both Indic and Latin/English glyphs)
         devLines.forEach { line ->
-            if (seen.add(line)) result.add(line)
+            if (seen.add(line.lowercase())) {
+                result.add(line)
+            }
         }
 
-        // 2. Add Latin lines ONLY if they provide real Latin metadata (email, website, GSTIN, legitimate English)
-        // and are NOT status bar noise or garbled Latin hallucinations from scanning Devanagari glyphs
-        val statusBarRegex = Regex("(?i).*\\d{1,2}:\\d{2}.*(?:KB/s|MB/s|\\d+%).*|.*\\d+\\s*(?:KB|MB)/s.*|.*\\b(?:VoLTE|4G|5G|LTE)\\b.*")
+        // 2. Add Latin pass lines that were not captured in the Devanagari pass
         latinLines.forEach { line ->
-            val isStatusBar = statusBarRegex.matches(line) || line.contains("KB/s", ignoreCase = true)
-            // Check for gibberish symbols (e.g. "HL.CEO499029R, CEOY9909€, asuldt")
-            val symbolCount = line.count { !it.isLetterOrDigit() && it !in " .@-_/,:()[]" }
-            val isGarbled = symbolCount > 2 || (line.length > 8 && line.count { it in "€$#%^*+=~`|<>" } > 0)
-
-            if (!isStatusBar && !isGarbled) {
-                val hasEmail = line.contains("@")
-                val hasWeb = line.contains("www.", ignoreCase = true) || line.contains("http", ignoreCase = true)
-                val hasGstin = FieldExtractor.extractGstin(line).isNotEmpty()
-                val hasPhone = FieldExtractor.extractPhoneNumbers(line).isNotEmpty()
-                val isLegitEnglish = line.split(Regex("\\s+")).all { word ->
-                    word.length > 1 && word.all { c -> c.isLetter() || c == '.' }
-                }
-
-                if (hasEmail || hasWeb || hasGstin || hasPhone || isLegitEnglish) {
-                    if (seen.add(line)) {
-                        result.add(line)
-                    }
-                }
+            if (seen.add(line.lowercase())) {
+                result.add(line)
             }
         }
 

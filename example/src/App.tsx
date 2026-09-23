@@ -187,13 +187,19 @@ Return JSON:
  * Replaces {{OCR_TEXT}} or ${rawText} if present, or appends the OCR text cleanly.
  */
 function applyUserPrompt(template: string, ocrText: string): string {
-  if (template.includes('{{OCR_TEXT}}')) {
-    return template.replace('{{OCR_TEXT}}', ocrText);
+  const safeTemplate =
+    typeof template === 'string' && template.trim()
+      ? template
+      : DEFAULT_PROMPT_TEMPLATE;
+  const safeOcrText = typeof ocrText === 'string' ? ocrText : '';
+
+  if (safeTemplate.includes('{{OCR_TEXT}}')) {
+    return safeTemplate.replace('{{OCR_TEXT}}', safeOcrText);
   }
-  if (template.includes('${rawText}')) {
-    return template.replace('${rawText}', ocrText);
+  if (safeTemplate.includes('${rawText}')) {
+    return safeTemplate.replace('${rawText}', safeOcrText);
   }
-  return `${template.trim()}\n\nOCR Text:\n${ocrText}\n\nReturn JSON:\n<|im_end|>\n<|im_start|>assistant\n{`;
+  return `${safeTemplate.trim()}\n\nOCR Text:\n${safeOcrText}\n\nReturn JSON:\n<|im_end|>\n<|im_start|>assistant\n{`;
 }
 
 // ─── Every Customizable LLM Setting for Selected Universal Indic Model ───────
@@ -315,9 +321,20 @@ export default function App() {
 
   // Load persisted prompt and settings from AsyncStorage on mount
   useEffect(() => {
+    // Check if the Universal Indic model is already downloaded on disk
+    downloadThinkingModel(universalModel.url, universalModel.filename)
+      .then((path) => {
+        if (path) {
+          setDownloadedModels({ [universalModel.id]: path });
+        }
+      })
+      .catch(() => {
+        // Not downloaded yet or first launch
+      });
+
     AsyncStorage.getItem(PROMPT_STORAGE_KEY)
       .then((saved) => {
-        if (saved && saved.trim()) {
+        if (saved && typeof saved === 'string' && saved.trim()) {
           setUserPrompt(saved);
           setPromptDraft(saved);
           setIsCustomPrompt(saved.trim() !== DEFAULT_PROMPT_TEMPLATE.trim());
@@ -329,7 +346,7 @@ export default function App() {
 
     AsyncStorage.getItem(LLM_SETTINGS_STORAGE_KEY)
       .then((saved) => {
-        if (saved && saved.trim()) {
+        if (saved && typeof saved === 'string' && saved.trim()) {
           try {
             const parsed = JSON.parse(saved);
             if (parsed && typeof parsed === 'object') {
@@ -358,13 +375,18 @@ export default function App() {
       .catch((err) => {
         console.warn('Failed to load saved settings', err);
       });
-  }, []);
+  }, [universalModel.url, universalModel.filename, universalModel.id]);
 
   const handleSavePrompt = async () => {
+    setError(null);
     try {
+      const cleanDraft =
+        typeof promptDraft === 'string'
+          ? promptDraft.trim()
+          : DEFAULT_PROMPT_TEMPLATE;
       await AsyncStorage.setItem(PROMPT_STORAGE_KEY, promptDraft);
       setUserPrompt(promptDraft);
-      setIsCustomPrompt(promptDraft.trim() !== DEFAULT_PROMPT_TEMPLATE.trim());
+      setIsCustomPrompt(cleanDraft !== DEFAULT_PROMPT_TEMPLATE.trim());
       setShowPromptEditor(false);
       setStatusMessage(
         '💾 Custom prompt saved! LLM will strictly use this prompt.'
@@ -375,6 +397,7 @@ export default function App() {
   };
 
   const handleResetPrompt = async () => {
+    setError(null);
     try {
       await AsyncStorage.removeItem(PROMPT_STORAGE_KEY);
       setUserPrompt(DEFAULT_PROMPT_TEMPLATE);
@@ -387,6 +410,7 @@ export default function App() {
   };
 
   const handleSaveSettings = async () => {
+    setError(null);
     try {
       await AsyncStorage.setItem(
         LLM_SETTINGS_STORAGE_KEY,
@@ -422,6 +446,7 @@ export default function App() {
   };
 
   const handleResetSettings = async () => {
+    setError(null);
     try {
       await AsyncStorage.removeItem(LLM_SETTINGS_STORAGE_KEY);
       setTempSettings(DEFAULT_LLM_SETTINGS);
@@ -747,14 +772,17 @@ export default function App() {
   };
 
   const handleLoadModel = async (overrideSettings?: LlmSettings) => {
+    setError(null);
+
     // If called directly from an event handler or with incomplete settings, fall back to llmSettings
-    const rawSettings =
+    const isValidSettings =
       overrideSettings &&
       typeof overrideSettings === 'object' &&
-      'n_threads' in overrideSettings &&
-      !('nativeEvent' in overrideSettings)
-        ? overrideSettings
-        : llmSettings;
+      typeof overrideSettings.n_threads === 'number' &&
+      !('nativeEvent' in overrideSettings) &&
+      !('_dispatchInstances' in overrideSettings);
+
+    const rawSettings = isValidSettings ? overrideSettings : llmSettings;
 
     const settings: LlmSettings = {
       ...DEFAULT_LLM_SETTINGS,
@@ -766,6 +794,9 @@ export default function App() {
       setError(`Model file for ${universalModel.name} not found on device.`);
       return;
     }
+
+    const cpuMask =
+      typeof settings?.cpu_mask === 'string' ? settings.cpu_mask.trim() : '';
 
     setSlmLoading(true);
     setStatusMessage(
@@ -789,9 +820,7 @@ export default function App() {
         cache_type_k: settings.cache_type_k || 'f16',
         cache_type_v: settings.cache_type_v || 'f16',
         no_extra_bufts: Boolean(settings.no_extra_bufts),
-        ...(typeof settings.cpu_mask === 'string' && settings.cpu_mask.trim()
-          ? { cpu_mask: settings.cpu_mask.trim() }
-          : {}),
+        ...(cpuMask ? { cpu_mask: cpuMask } : {}),
       });
       llamaContextRef.current = ctx;
       setActiveModelId(universalModel.id);

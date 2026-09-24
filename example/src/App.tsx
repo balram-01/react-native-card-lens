@@ -61,6 +61,9 @@ const AVAILABLE_SLM_MODELS = [
   },
 ];
 
+const UNIVERSAL_MODEL = AVAILABLE_SLM_MODELS[0]!;
+const DOWNLOADED_MODELS_STORAGE_KEY = '@cardlens_downloaded_models';
+
 // ─── User Editable Prompt Template & Storage ────────────────────────────────
 const PROMPT_STORAGE_KEY = '@cardlens_user_llm_prompt';
 
@@ -285,6 +288,9 @@ export const DEFAULT_LLM_SETTINGS: LlmSettings = {
 const LLM_SETTINGS_STORAGE_KEY = '@cardlens_llm_settings_v4';
 
 export default function App() {
+  // Universal Indic Model is the sole model
+  const universalModel = UNIVERSAL_MODEL;
+
   // OCR & Image State
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -319,18 +325,75 @@ export default function App() {
     badgeType: 'green' | 'indigo' | 'amber';
   } | null>(null);
 
+  // Clipboard Copied State
+  const [copiedSection, setCopiedSection] = useState<'ocr' | 'llm' | null>(
+    null
+  );
+
+  // Fullscreen Modal State
+  const [fullscreenModal, setFullscreenModal] = useState<{
+    title: string;
+    subtitle: string;
+    badge: string;
+    badgeType: 'green' | 'indigo';
+    content: string;
+    type: 'ocr' | 'llm';
+  } | null>(null);
+
+  // SLM / GGUF Download & Manager State
+  const [showLlmManager, setShowLlmManager] = useState(false);
+  const [downloadedModels, setDownloadedModels] = useState<
+    Record<string, string>
+  >({});
+  const [activeModelId, setActiveModelId] = useState<string | null>(null);
+  const [downloadingModelId, setDownloadingModelId] = useState<string | null>(
+    null
+  );
+  const [downloadProgress, setDownloadProgress] =
+    useState<ThinkingModelDownloadProgress | null>(null);
+  const [slmLoading, setSlmLoading] = useState(false);
+
+  const llamaContextRef = useRef<LlamaContext | null>(null);
+
+  const isModelDownloaded = !!downloadedModels[universalModel.id];
+  const isModelActive = activeModelId === universalModel.id;
+  const isModelDownloading = downloadingModelId === universalModel.id;
+
   // Load persisted prompt and settings from AsyncStorage on mount
   useEffect(() => {
-    // Check if the Universal Indic model is already downloaded on disk
-    downloadThinkingModel(universalModel.url, universalModel.filename)
-      .then((path) => {
-        if (path) {
-          setDownloadedModels({ [universalModel.id]: path });
+    // Check persisted downloaded models cache or check on disk
+    AsyncStorage.getItem(DOWNLOADED_MODELS_STORAGE_KEY)
+      .then((saved) => {
+        if (saved && typeof saved === 'string') {
+          try {
+            const parsed = JSON.parse(saved);
+            if (
+              parsed &&
+              typeof parsed === 'object' &&
+              parsed[universalModel.id]
+            ) {
+              setDownloadedModels(parsed);
+              return;
+            }
+          } catch {}
         }
+        // Fallback: Check if the Universal Indic model is already downloaded on disk
+        downloadThinkingModel(universalModel.url, universalModel.filename)
+          .then((path) => {
+            if (path) {
+              const updated = { [universalModel.id]: path };
+              setDownloadedModels(updated);
+              AsyncStorage.setItem(
+                DOWNLOADED_MODELS_STORAGE_KEY,
+                JSON.stringify(updated)
+              ).catch(() => {});
+            }
+          })
+          .catch(() => {
+            // Not downloaded yet or first launch
+          });
       })
-      .catch(() => {
-        // Not downloaded yet or first launch
-      });
+      .catch(() => {});
 
     AsyncStorage.getItem(PROMPT_STORAGE_KEY)
       .then((saved) => {
@@ -456,42 +519,6 @@ export default function App() {
       setError(`Failed to reset settings: ${e.message || String(e)}`);
     }
   };
-
-  // Clipboard Copied State
-  const [copiedSection, setCopiedSection] = useState<'ocr' | 'llm' | null>(
-    null
-  );
-
-  // Fullscreen Modal State
-  const [fullscreenModal, setFullscreenModal] = useState<{
-    title: string;
-    subtitle: string;
-    badge: string;
-    badgeType: 'green' | 'indigo';
-    content: string;
-    type: 'ocr' | 'llm';
-  } | null>(null);
-
-  // SLM / GGUF Download & Manager State
-  const [showLlmManager, setShowLlmManager] = useState(false);
-  const [downloadedModels, setDownloadedModels] = useState<
-    Record<string, string>
-  >({});
-  const [activeModelId, setActiveModelId] = useState<string | null>(null);
-  const [downloadingModelId, setDownloadingModelId] = useState<string | null>(
-    null
-  );
-  const [downloadProgress, setDownloadProgress] =
-    useState<ThinkingModelDownloadProgress | null>(null);
-  const [slmLoading, setSlmLoading] = useState(false);
-
-  const llamaContextRef = useRef<LlamaContext | null>(null);
-
-  // Universal Indic Model is the sole model
-  const universalModel = AVAILABLE_SLM_MODELS[0]!;
-  const isModelDownloaded = !!downloadedModels[universalModel.id];
-  const isModelActive = activeModelId === universalModel.id;
-  const isModelDownloading = downloadingModelId === universalModel.id;
 
   // Clear current flow
   const handleClear = () => {
@@ -761,7 +788,14 @@ export default function App() {
         universalModel.filename,
         (prog) => setDownloadProgress(prog)
       );
-      setDownloadedModels({ [universalModel.id]: localPath });
+      const updatedModels = { [universalModel.id]: localPath };
+      setDownloadedModels(updatedModels);
+      try {
+        await AsyncStorage.setItem(
+          DOWNLOADED_MODELS_STORAGE_KEY,
+          JSON.stringify(updatedModels)
+        );
+      } catch {}
       setStatusMessage(`✅ Downloaded: ${universalModel.name}`);
     } catch (e: any) {
       setError(e.message || 'Model download failed');

@@ -1201,6 +1201,17 @@ class CardLensModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  override fun deleteThinkingModel(fileName: String, promise: Promise) {
+    backgroundExecutor.execute {
+      try {
+        val deleted = ThinkingModuleEngine.deleteDownloadedModel(reactApplicationContext, fileName)
+        promise.resolve(deleted)
+      } catch (e: Exception) {
+        promise.reject("CARDLENS_THINKING_DELETE_ERROR", e.message, e)
+      }
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // PaddleOCR Multilingual On-Device Engine
   // ─────────────────────────────────────────────────────────────────────────────

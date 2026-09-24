@@ -147,6 +147,13 @@ export interface Spec extends TurboModule {
   ): Promise<string>;
 
   /**
+   * Deletes a downloaded Thinking Module GGUF model file from device internal storage.
+   *
+   * @param fileName Filename to delete.
+   */
+  deleteThinkingModel(fileName: string): Promise<boolean>;
+
+  /**
    * Run on-device PaddleOCR (PP-OCRv5/v4) multilingual text recognition on the given image URI.
    *
    * @param imageUri  A `file://` or `content://` URI pointing to the image.

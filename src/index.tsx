@@ -87,6 +87,7 @@ export {
   isThinkingModelReady,
   refineCardWithThinkingModule,
   downloadThinkingModel,
+  deleteThinkingModel,
 } from './ThinkingModule';
 export type { ThinkingModelDownloadProgress } from './ThinkingModule';
 

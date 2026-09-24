@@ -99,6 +99,18 @@ object ThinkingModuleEngine {
     }
 
     /**
+     * Deletes a downloaded model file from the internal models directory.
+     */
+    fun deleteDownloadedModel(context: Context, fileName: String): Boolean {
+        val modelsDir = File(context.filesDir, "models")
+        val destFile = File(modelsDir, fileName)
+        if (destFile.exists()) {
+            return destFile.delete()
+        }
+        return true
+    }
+
+    /**
      * Format prompt for structured extraction with rigorous accuracy and field disambiguation rules.
      */
     fun buildExtractionPrompt(rawText: String): String {

@@ -33,6 +33,7 @@ import {
   pickDocument,
   recognizeText,
   downloadThinkingModel,
+  deleteThinkingModel,
 } from 'react-native-card-lens';
 import type {
   RawOcrResult,
@@ -885,6 +886,28 @@ export default function App() {
     }
   };
 
+  const handleDeleteModel = async () => {
+    setError(null);
+    try {
+      if (llamaContextRef.current) {
+        await llamaContextRef.current.release();
+        llamaContextRef.current = null;
+      }
+      setActiveModelId(null);
+      await deleteThinkingModel(universalModel.filename);
+      const updatedModels = { ...downloadedModels };
+      delete updatedModels[universalModel.id];
+      setDownloadedModels(updatedModels);
+      await AsyncStorage.setItem(
+        DOWNLOADED_MODELS_STORAGE_KEY,
+        JSON.stringify(updatedModels)
+      );
+      setStatusMessage();
+    } catch (e: any) {
+      setError(e.message || 'Failed to delete model file');
+    }
+  };
+
   return (
     <View style={styles.safeArea}>
       <StatusBar
@@ -986,6 +1009,32 @@ export default function App() {
               </View>
             </View>
 
+            {/* Downloaded Path Info Banner */}
+            {isModelDownloaded && downloadedModels[universalModel.id] ? (
+              <View style={styles.modelPathContainer}>
+                <View style={styles.modelPathHeaderRow}>
+                  <Text style={styles.modelPathLabel}>
+                    📂 Storage Location Path:
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.modelPathCopyBtn}
+                    onPress={() => {
+                      Clipboard.setString(
+                        downloadedModels[universalModel.id] || ''
+                      );
+                      setStatusMessage('📋 Copied model path to clipboard!');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.modelPathCopyText}>📋 Copy Path</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.modelPathText} selectable={true}>
+                  {downloadedModels[universalModel.id]}
+                </Text>
+              </View>
+            ) : null}
+
             {/* Model Actions */}
             <View style={styles.modelActionRow}>
               {isModelActive ? (
@@ -997,18 +1046,29 @@ export default function App() {
                   <Text style={styles.modelActionBtnText}>Unload from RAM</Text>
                 </TouchableOpacity>
               ) : isModelDownloaded ? (
-                <TouchableOpacity
-                  style={styles.modelActionBtnPrimary}
-                  onPress={() => handleLoadModel()}
-                  disabled={slmLoading}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.modelActionBtnText}>
-                    {slmLoading
-                      ? 'Loading into RAM...'
-                      : 'Load into RAM (llama.rn)'}
-                  </Text>
-                </TouchableOpacity>
+                <View style={styles.modelDownloadedActionsRow}>
+                  <TouchableOpacity
+                    style={[styles.modelActionBtnPrimary, { flex: 1 }]}
+                    onPress={() => handleLoadModel()}
+                    disabled={slmLoading}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.modelActionBtnText}>
+                      {slmLoading
+                        ? 'Loading into RAM...'
+                        : 'Load into RAM (llama.rn)'}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.modelDeleteBtn}
+                    onPress={handleDeleteModel}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.modelDeleteBtnText}>
+                      🗑️ Delete Model
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               ) : (
                 <TouchableOpacity
                   style={styles.modelActionBtnPrimary}
@@ -3317,6 +3377,65 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 8,
     alignItems: 'center',
+  },
+  modelPathContainer: {
+    backgroundColor: '#090D1A',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 10,
+    marginBottom: 8,
+  },
+  modelPathHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  modelPathLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#38BDF8',
+    letterSpacing: 0.2,
+  },
+  modelPathCopyBtn: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  modelPathCopyText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  modelPathText: {
+    fontSize: 10,
+    color: '#94A3B8',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 14,
+  },
+  modelDownloadedActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  modelDeleteBtn: {
+    backgroundColor: '#7F1D1D33',
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelDeleteBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FCA5A5',
   },
   modelActionBtnText: {
     fontSize: 12,

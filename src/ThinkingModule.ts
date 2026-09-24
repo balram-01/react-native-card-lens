@@ -91,3 +91,13 @@ export async function downloadThinkingModel(
     subscription?.remove();
   }
 }
+
+/**
+ * Deletes a downloaded Thinking Module GGUF model file from disk storage to free up space.
+ *
+ * @param fileName  Filename to remove (e.g. 'qwen2.5-1.5b-instruct-q4_k_m.gguf').
+ * @returns         Boolean indicating whether file was deleted.
+ */
+export async function deleteThinkingModel(fileName: string): Promise<boolean> {
+  return await NativeCardLens.deleteThinkingModel(fileName);
+}

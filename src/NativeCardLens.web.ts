@@ -57,6 +57,7 @@ const webMock: Spec = {
   refineCardWithThinkingModule: async (rawText: string) => ({ rawText }),
   unloadThinkingModel: async () => {},
   downloadThinkingModel: async () => '/models/mock.task',
+  deleteThinkingModel: async () => true,
   recognizeTextPaddle: async () => ({ rawText: '', blocks: [] }),
   isPaddleOcrReady: async () => false,
   downloadPaddleOcrModels: async () => false,
